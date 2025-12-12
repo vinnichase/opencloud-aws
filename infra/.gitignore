@@ -7,9 +7,12 @@ bin/
 # Pulumi
 .pulumi/
 
-# Environment
+# Environment (keep .env.sample)
 .env
-.env.*
+.env.dev
+.env.prod
+.env.staging
+.env.local
 
 # IDE
 .idea/

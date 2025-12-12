@@ -1,14 +1,26 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
+import * as dotenv from "dotenv";
+import * as path from "path";
 
-// Configuration
-const config = new pulumi.Config();
-const domainName = config.require("domainName");
-const hostedZoneId = config.require("hostedZoneId");
-const adminPassword = config.requireSecret("adminPassword");
-const acmeEmail = config.require("acmeEmail");
-const instanceType = config.get("instanceType") || "t4g.micro";
-const keyName = config.get("keyName"); // Optional: SSH key pair name
+// Load environment variables from stack-specific .env file
+const stackName = pulumi.getStack();
+const envFile = path.join(__dirname, `.env.${stackName}`);
+dotenv.config({ path: envFile });
+
+// Configuration from environment variables
+const domainName = process.env.DOMAIN_NAME;
+const hostedZoneId = process.env.HOSTED_ZONE_ID;
+const adminPassword = process.env.ADMIN_PASSWORD;
+const acmeEmail = process.env.ACME_EMAIL;
+const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
+const keyName = process.env.KEY_NAME;
+
+// Validate required configuration
+if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
+if (!hostedZoneId) throw new Error("HOSTED_ZONE_ID is required in .env file");
+if (!adminPassword) throw new Error("ADMIN_PASSWORD is required in .env file");
+if (!acmeEmail) throw new Error("ACME_EMAIL is required in .env file");
 
 // Get current AWS region
 const currentRegion = aws.getRegion({});

@@ -1,6 +1,6 @@
 # OpenCloud Infrastructure
 
-Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS using the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository.
+Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS and S3 storage using the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository.
 
 ## Prerequisites
 
@@ -17,40 +17,52 @@ Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS using the officia
    pnpm install
    ```
 
-2. Configure the stack:
+2. Create your environment file (one per stack):
    ```bash
-   pulumi config set domainName cloud.your-domain.com
-   pulumi config set hostedZoneId Z1234567890ABC
-   pulumi config set acmeEmail admin@your-domain.com
-   pulumi config set --secret adminPassword YourSecurePassword
+   # For dev stack
+   cp .env.sample .env.dev
 
-   # Optional
-   pulumi config set instanceType t3.medium
-   pulumi config set keyName your-ssh-key  # For SSH access
+   # For prod stack
+   cp .env.sample .env.prod
    ```
 
-3. Deploy:
+3. Edit the environment file with your values:
    ```bash
+   # .env.dev
+   AWS_REGION=us-east-1
+   DOMAIN_NAME=cloud.your-domain.com
+   HOSTED_ZONE_ID=Z1234567890ABC
+   ADMIN_PASSWORD=YourSecurePassword
+   ACME_EMAIL=admin@your-domain.com
+   ```
+
+4. Initialize and deploy:
+   ```bash
+   pulumi stack init dev
    pulumi up
    ```
 
 ## Configuration Options
 
-| Name | Required | Default | Description |
-|------|----------|---------|-------------|
-| `domainName` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
-| `hostedZoneId` | Yes | - | Route53 hosted zone ID |
-| `adminPassword` | Yes | - | Initial admin password (stored as secret) |
-| `acmeEmail` | Yes | - | Email for Let's Encrypt certificates |
-| `instanceType` | No | `t3.medium` | EC2 instance type |
-| `keyName` | No | - | SSH key pair name for access |
+Environment variables in `.env.<stack>`:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DOMAIN_NAME` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
+| `HOSTED_ZONE_ID` | Yes | - | Route53 hosted zone ID |
+| `ADMIN_PASSWORD` | Yes | - | Initial admin password |
+| `ACME_EMAIL` | Yes | - | Email for Let's Encrypt certificates |
+| `INSTANCE_TYPE` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
+| `KEY_NAME` | No | - | SSH key pair name for access |
 
 ## Resources Created
 
-- EC2 instance (Amazon Linux 2023)
+- EC2 instance (Amazon Linux 2023 ARM64)
 - Elastic IP (static public IP)
 - Security group (ports 22, 80, 443)
 - Route53 A record
+- S3 bucket for blob storage
+- IAM user with S3 access
 
 ## What Gets Deployed
 
@@ -58,7 +70,7 @@ The user data script automatically:
 1. Installs Docker and Docker Compose v2
 2. Installs Git
 3. Clones the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository
-4. Configures `.env` with your domain and credentials
+4. Configures `.env` with your domain, credentials, and S3 storage
 5. Starts OpenCloud with Traefik for automatic SSL via Let's Encrypt
 
 ## Outputs
@@ -67,6 +79,8 @@ The user data script automatically:
 - `publicIp` - Elastic IP address
 - `publicDns` - Public DNS hostname
 - `domainUrl` - Full HTTPS URL
+- `s3BucketName` - S3 bucket name for blob storage
+- `s3BucketArn` - S3 bucket ARN
 
 ## Accessing OpenCloud
 
@@ -75,7 +89,7 @@ After deployment completes (allow 5-10 minutes for initialization):
 1. Visit `https://cloud.your-domain.com`
 2. Login with:
    - Username: `admin`
-   - Password: (the adminPassword you configured)
+   - Password: (the ADMIN_PASSWORD you configured)
 
 ## Monitoring Deployment
 
@@ -84,6 +98,21 @@ SSH into the instance and check logs:
 ssh -i your-key.pem ec2-user@<public-ip>
 sudo tail -f /var/log/user-data.log
 sudo docker compose -f /opt/opencloud-compose/docker-compose.yml logs -f
+```
+
+## Multiple Environments
+
+Create separate `.env` files for each environment:
+```
+.env.dev      # Development
+.env.staging  # Staging
+.env.prod     # Production
+```
+
+Switch stacks with:
+```bash
+pulumi stack select dev
+pulumi stack select prod
 ```
 
 ## Cleanup
