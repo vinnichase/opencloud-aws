@@ -7,7 +7,7 @@ const domainName = config.require("domainName");
 const hostedZoneId = config.require("hostedZoneId");
 const adminPassword = config.requireSecret("adminPassword");
 const acmeEmail = config.require("acmeEmail");
-const instanceType = config.get("instanceType") || "t3.medium";
+const instanceType = config.get("instanceType") || "t4g.micro";
 const keyName = config.get("keyName"); // Optional: SSH key pair name
 
 // Get current AWS region
@@ -77,12 +77,13 @@ const s3Policy = new aws.iam.UserPolicy("opencloud-s3-policy", {
     })),
 });
 
-// Get the latest Amazon Linux 2023 AMI
+// Get the latest Amazon Linux 2023 AMI (ARM64 for Graviton instances)
 const ami = aws.ec2.getAmi({
     mostRecent: true,
     owners: ["amazon"],
     filters: [
-        { name: "name", values: ["al2023-ami-*-x86_64"] },
+        { name: "name", values: ["al2023-ami-*-arm64"] },
+        { name: "architecture", values: ["arm64"] },
         { name: "virtualization-type", values: ["hvm"] },
     ],
 });
@@ -156,7 +157,7 @@ systemctl enable docker
 
 # Install Docker Compose v2 plugin
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o /usr/local/lib/docker/cli-plugins/docker-compose
+curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64" -o /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
 # Also install standalone for compatibility
