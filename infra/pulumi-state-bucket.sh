@@ -39,6 +39,21 @@ aws s3api put-bucket-encryption \
   --server-side-encryption-configuration \
     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
 
+echo "Generating Pulumi config passphrase..."
+PASSPHRASE=$(openssl rand -base64 32)
+PARAM_NAME="/pulumi/${BUCKET_NAME}/config-passphrase"
+
+aws ssm put-parameter \
+  --name "$PARAM_NAME" \
+  --type SecureString \
+  --value "$PASSPHRASE" \
+  --description "Pulumi config passphrase for $BUCKET_NAME" \
+  --overwrite
+
 echo ""
 echo "Bucket $BUCKET_NAME created successfully!"
-echo "To use with Pulumi: pulumi login s3://$BUCKET_NAME"
+echo "Passphrase stored in SSM: $PARAM_NAME"
+echo ""
+echo "To use with Pulumi:"
+echo "  export PULUMI_CONFIG_PASSPHRASE=\$(aws ssm get-parameter --name $PARAM_NAME --with-decryption --query Parameter.Value --output text)"
+echo "  pulumi login s3://$BUCKET_NAME"

@@ -1,18 +1,18 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as random from "@pulumi/random";
-import * as dotenv from "dotenv";
-import * as path from "path";
+// import * as dotenv from "dotenv";
+// import * as path from "path";
 
 // Load environment variables from stack-specific .env file
 const stackName = pulumi.getStack();
-const envFile = path.join(__dirname, `.env.${stackName}`);
-dotenv.config({ path: envFile });
+// const envFile = path.join(__dirname, `.env.${stackName}`);
+// dotenv.config({ path: envFile });
 
 // Configuration from environment variables
-const domainName = process.env.DOMAIN_NAME;
+const domainName = process.env.DOMAIN_NAME || "opencloud.gothub.io";
 const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
-const keyName = process.env.KEY_NAME;
+const keyName = process.env.KEY_NAME || 'opencloud';
 
 // Validate required configuration
 if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
@@ -65,6 +65,7 @@ const currentRegion = aws.getRegion({});
 // Create a provider for us-east-1 (required for CloudFront ACM certificates)
 const usEast1 = new aws.Provider("us-east-1", {
     region: "us-east-1",
+    profile: process.env.AWS_PROFILE,
 });
 
 // Create ACM certificate for CloudFront (must be in us-east-1)
