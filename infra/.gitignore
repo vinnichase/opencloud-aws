@@ -8,11 +8,8 @@ bin/
 .pulumi/
 
 # Environment (keep .env.sample)
-.env
-.env.dev
-.env.prod
-.env.staging
-.env.local
+.env*
+!.env.sample
 
 # IDE
 .idea/
