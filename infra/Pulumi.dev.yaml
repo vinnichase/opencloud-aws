@@ -1,0 +1,8 @@
+config:
+  aws:region: us-east-1
+  # Required: Set these values for your deployment
+  # opencloud-infra:domainName: your-domain.com
+  # opencloud-infra:hostedZoneId: Z1234567890ABC
+  # Optional configuration
+  # opencloud-infra:instanceType: t3.medium
+  # opencloud-infra:keyName: your-ssh-key-name
