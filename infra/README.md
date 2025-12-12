@@ -1,6 +1,6 @@
 # OpenCloud Infrastructure
 
-Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS and S3 storage using the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository.
+Pulumi project to deploy OpenCloud on AWS with CloudFront CDN, ACM certificate, and S3 storage using the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository.
 
 ## Prerequisites
 
@@ -29,9 +29,9 @@ Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS and S3 storage us
 3. Edit the environment file with your values:
    ```bash
    # .env.dev
+   AWS_PROFILE=default
    AWS_REGION=eu-central-1
    DOMAIN_NAME=cloud.your-domain.com
-   ACME_EMAIL=admin@your-domain.com
    ```
 
 4. Initialize and deploy:
@@ -46,33 +46,36 @@ Environment variables in `.env.<stack>`:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `AWS_PROFILE` | No | `default` | AWS CLI profile to use |
+| `AWS_REGION` | No | - | AWS region for EC2 and S3 |
 | `DOMAIN_NAME` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
-| `ACME_EMAIL` | Yes | - | Email for Let's Encrypt certificates |
 | `INSTANCE_TYPE` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
 | `KEY_NAME` | No | - | SSH key pair name for access |
 
 **Notes:**
-- The Route53 hosted zone is auto-discovered from the domain name
+- Route53 hosted zone is auto-discovered from the domain name
 - Admin password is auto-generated and stored in SSM Parameter Store
+- SSL certificate is auto-created via ACM and validated via DNS
+
+## Architecture
+
+```
+User → CloudFront (HTTPS) → EC2 Instance (HTTP) → OpenCloud
+                                    ↓
+                              S3 (blob storage)
+```
 
 ## Resources Created
 
-- EC2 instance (Amazon Linux 2023 ARM64)
-- Elastic IP (static public IP)
-- Security group (ports 22, 80, 443)
-- Route53 A record
-- S3 bucket for blob storage
-- IAM user with S3 access
-- SSM Parameter (SecureString) for admin password
-
-## What Gets Deployed
-
-The user data script automatically:
-1. Installs Docker and Docker Compose v2
-2. Installs Git
-3. Clones the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository
-4. Configures `.env` with your domain, credentials, and S3 storage
-5. Starts OpenCloud with Traefik for automatic SSL via Let's Encrypt
+- **CloudFront** distribution with custom domain
+- **ACM Certificate** (in us-east-1, auto-validated via DNS)
+- **EC2 instance** (Amazon Linux 2023 ARM64)
+- **Elastic IP** (static public IP for origin)
+- **Security group** (ports 22, 80, 443)
+- **Route53 A record** (alias to CloudFront)
+- **S3 bucket** for blob storage
+- **IAM user** with S3 access
+- **SSM Parameter** (SecureString) for admin password
 
 ## Outputs
 
@@ -80,10 +83,12 @@ The user data script automatically:
 - `publicIp` - Elastic IP address
 - `publicDns` - Public DNS hostname
 - `domainUrl` - Full HTTPS URL
-- `s3BucketName` - S3 bucket name for blob storage
+- `cloudfrontDomain` - CloudFront distribution domain
+- `certificateArn` - ACM certificate ARN
+- `s3BucketName` - S3 bucket name
 - `s3BucketArn` - S3 bucket ARN
-- `hostedZoneId` - Auto-discovered Route53 hosted zone ID
-- `hostedZoneName` - Auto-discovered Route53 hosted zone name
+- `hostedZoneId` - Route53 hosted zone ID
+- `hostedZoneName` - Route53 hosted zone name
 - `adminPasswordSsmParam` - SSM parameter name for admin password
 
 ## Accessing OpenCloud

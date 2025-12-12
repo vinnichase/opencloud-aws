@@ -11,13 +11,11 @@ dotenv.config({ path: envFile });
 
 // Configuration from environment variables
 const domainName = process.env.DOMAIN_NAME;
-const acmeEmail = process.env.ACME_EMAIL;
 const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
 const keyName = process.env.KEY_NAME;
 
 // Validate required configuration
 if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
-if (!acmeEmail) throw new Error("ACME_EMAIL is required in .env file");
 
 // Generate admin password
 const adminPassword = new random.RandomPassword("admin-password", {
@@ -63,6 +61,35 @@ const hostedZone = findHostedZone(domainName);
 
 // Get current AWS region
 const currentRegion = aws.getRegion({});
+
+// Create a provider for us-east-1 (required for CloudFront ACM certificates)
+const usEast1 = new aws.Provider("us-east-1", {
+    region: "us-east-1",
+});
+
+// Create ACM certificate for CloudFront (must be in us-east-1)
+const certificate = new aws.acm.Certificate("opencloud-cert", {
+    domainName: domainName,
+    validationMethod: "DNS",
+    tags: {
+        Name: "opencloud-cert",
+    },
+}, { provider: usEast1 });
+
+// Create DNS validation records
+const certValidationRecord = new aws.route53.Record("opencloud-cert-validation", {
+    zoneId: pulumi.output(hostedZone).apply(z => z.zoneId),
+    name: certificate.domainValidationOptions[0].resourceRecordName,
+    type: certificate.domainValidationOptions[0].resourceRecordType,
+    records: [certificate.domainValidationOptions[0].resourceRecordValue],
+    ttl: 60,
+});
+
+// Wait for certificate validation
+const certValidation = new aws.acm.CertificateValidation("opencloud-cert-validation", {
+    certificateArn: certificate.arn,
+    validationRecordFqdns: [certValidationRecord.fqdn],
+}, { provider: usEast1 });
 
 // Create S3 bucket for OpenCloud blob storage
 const bucket = new aws.s3.Bucket("opencloud-storage", {
@@ -186,12 +213,11 @@ const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
 const userData = pulumi.all([
     domainName,
     adminPassword.result,
-    acmeEmail,
     bucket.bucket,
     s3AccessKey.id,
     s3AccessKey.secret,
     currentRegion.then(r => r.name),
-]).apply(([domain, password, email, bucketName, accessKey, secretKey, region]) => `#!/bin/bash
+]).apply(([domain, password, bucketName, accessKey, secretKey, region]) => `#!/bin/bash
 set -ex
 
 exec > >(tee /var/log/user-data.log) 2>&1
@@ -227,18 +253,15 @@ cd /opt
 git clone https://github.com/opencloud-eu/opencloud-compose.git
 cd opencloud-compose
 
-# Create .env configuration
+# Create .env configuration (SSL handled by CloudFront)
 cat > .env << 'ENVEOF'
 # OpenCloud Configuration
 OC_DOMAIN=${domain}
 INITIAL_ADMIN_PASSWORD=${password}
 
-# Traefik / Let's Encrypt
-TRAEFIK_ACME_MAIL=${email}
-TRAEFIK_ACME_CASERVER=https://acme-v02.api.letsencrypt.org/directory
-
-# Compose files to use (base + traefik + S3 storage)
-COMPOSE_FILE=docker-compose.yml:traefik/opencloud.yml:storage/decomposeds3.yml
+# Run without Traefik SSL - CloudFront handles HTTPS
+COMPOSE_FILE=docker-compose.yml:storage/decomposeds3.yml
+INSECURE=true
 
 # Persistent storage for config (data goes to S3)
 OC_CONFIG_DIR=/opt/opencloud/config
@@ -285,13 +308,60 @@ const eip = new aws.ec2.Eip("opencloud-eip", {
     },
 });
 
-// Create Route53 DNS record
+// Create CloudFront distribution
+const cdn = new aws.cloudfront.Distribution("opencloud-cdn", {
+    enabled: true,
+    aliases: [domainName],
+
+    origins: [{
+        domainName: eip.publicDns,
+        originId: "ec2",
+        customOriginConfig: {
+            httpPort: 80,
+            httpsPort: 443,
+            originProtocolPolicy: "http-only",
+            originSslProtocols: ["TLSv1.2"],
+        },
+    }],
+
+    defaultCacheBehavior: {
+        targetOriginId: "ec2",
+        viewerProtocolPolicy: "redirect-to-https",
+        allowedMethods: ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
+        cachedMethods: ["GET", "HEAD"],
+        compress: true,
+        // Disable caching - pass all requests to origin
+        cachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
+        originRequestPolicyId: "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
+    },
+
+    restrictions: {
+        geoRestriction: {
+            restrictionType: "none",
+        },
+    },
+
+    viewerCertificate: {
+        acmCertificateArn: certValidation.certificateArn,
+        sslSupportMethod: "sni-only",
+        minimumProtocolVersion: "TLSv1.2_2021",
+    },
+
+    tags: {
+        Name: "opencloud-cdn",
+    },
+});
+
+// Create Route53 DNS record pointing to CloudFront
 export const dnsRecord = new aws.route53.Record("opencloud-dns", {
     zoneId: pulumi.output(hostedZone).apply(z => z.zoneId),
     name: domainName,
     type: "A",
-    ttl: 300,
-    records: [eip.publicIp],
+    aliases: [{
+        name: cdn.domainName,
+        zoneId: cdn.hostedZoneId,
+        evaluateTargetHealth: false,
+    }],
 });
 
 // Export the discovered hosted zone
@@ -306,3 +376,5 @@ export const domainUrl = pulumi.interpolate`https://${domainName}`;
 export const s3BucketName = bucket.bucket;
 export const s3BucketArn = bucket.arn;
 export const adminPasswordSsmParam = adminPasswordParam.name;
+export const cloudfrontDomain = cdn.domainName;
+export const certificateArn = certificate.arn;
