@@ -261,7 +261,7 @@ OC_DOMAIN=${domain}
 INITIAL_ADMIN_PASSWORD=${password}
 
 # Run without Traefik SSL - CloudFront handles HTTPS
-COMPOSE_FILE=docker-compose.yml:storage/decomposeds3.yml
+COMPOSE_FILE=docker-compose.yml:storage/decomposeds3.yml:docker-compose.override.yml
 INSECURE=true
 
 # Persistent storage for config (data goes to S3)
@@ -278,6 +278,14 @@ DECOMPOSEDS3_BUCKET=${bucketName}
 LOG_LEVEL=info
 ENVEOF
 
+# Create override to expose port 9200 to host port 80 (for CloudFront)
+cat > docker-compose.override.yml << 'OVERRIDEEOF'
+services:
+  opencloud:
+    ports:
+      - "80:9200"
+OVERRIDEEOF
+
 # Start OpenCloud with Docker Compose
 docker compose up -d
 
@@ -291,6 +299,7 @@ const instance = new aws.ec2.Instance("opencloud-instance", {
     vpcSecurityGroupIds: [securityGroup.id],
     keyName: keyName,
     userData: userData,
+    userDataReplaceOnChange: true,
     rootBlockDevice: {
         volumeSize: 30,
         volumeType: "gp3",
