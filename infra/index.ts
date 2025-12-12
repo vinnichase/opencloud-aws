@@ -1,18 +1,18 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as random from "@pulumi/random";
-// import * as dotenv from "dotenv";
-// import * as path from "path";
+import * as dotenv from "dotenv";
+import * as path from "path";
 
 // Load environment variables from stack-specific .env file
 const stackName = pulumi.getStack();
-// const envFile = path.join(__dirname, `.env.${stackName}`);
-// dotenv.config({ path: envFile });
+const envFile = path.join(__dirname, `.env.${stackName}`);
+dotenv.config({ path: envFile });
 
 // Configuration from environment variables
-const domainName = process.env.DOMAIN_NAME || "opencloud.gothub.io";
+const domainName = process.env.DOMAIN_NAME;
 const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
-const keyName = process.env.KEY_NAME || 'opencloud';
+const keyName = process.env.KEY_NAME;
 
 // Validate required configuration
 if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
