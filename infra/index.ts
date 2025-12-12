@@ -10,7 +10,6 @@ dotenv.config({ path: envFile });
 
 // Configuration from environment variables
 const domainName = process.env.DOMAIN_NAME;
-const hostedZoneId = process.env.HOSTED_ZONE_ID;
 const adminPassword = process.env.ADMIN_PASSWORD;
 const acmeEmail = process.env.ACME_EMAIL;
 const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
@@ -18,9 +17,31 @@ const keyName = process.env.KEY_NAME;
 
 // Validate required configuration
 if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
-if (!hostedZoneId) throw new Error("HOSTED_ZONE_ID is required in .env file");
 if (!adminPassword) throw new Error("ADMIN_PASSWORD is required in .env file");
 if (!acmeEmail) throw new Error("ACME_EMAIL is required in .env file");
+
+// Find Route53 hosted zone by recursively searching domain parts
+async function findHostedZone(domain: string): Promise<aws.route53.GetZoneResult> {
+    const parts = domain.split(".");
+
+    for (let i = 0; i < parts.length - 1; i++) {
+        const zoneName = parts.slice(i).join(".");
+        try {
+            const zone = await aws.route53.getZone({ name: zoneName });
+            return zone;
+        } catch {
+            // Zone not found, try parent domain
+            continue;
+        }
+    }
+
+    throw new Error(
+        `No Route53 hosted zone found for domain "${domain}". ` +
+        `Searched for: ${parts.map((_, i) => parts.slice(i).join(".")).slice(0, -1).join(", ")}`
+    );
+}
+
+const hostedZone = findHostedZone(domainName);
 
 // Get current AWS region
 const currentRegion = aws.getRegion({});
@@ -248,12 +269,16 @@ const eip = new aws.ec2.Eip("opencloud-eip", {
 
 // Create Route53 DNS record
 export const dnsRecord = new aws.route53.Record("opencloud-dns", {
-    zoneId: hostedZoneId,
+    zoneId: pulumi.output(hostedZone).apply(z => z.zoneId),
     name: domainName,
     type: "A",
     ttl: 300,
     records: [eip.publicIp],
 });
+
+// Export the discovered hosted zone
+export const hostedZoneId = pulumi.output(hostedZone).apply(z => z.zoneId);
+export const hostedZoneName = pulumi.output(hostedZone).apply(z => z.name);
 
 // Exports
 export const instanceId = instance.id;

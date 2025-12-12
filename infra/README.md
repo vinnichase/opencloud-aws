@@ -31,7 +31,6 @@ Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS and S3 storage us
    # .env.dev
    AWS_REGION=us-east-1
    DOMAIN_NAME=cloud.your-domain.com
-   HOSTED_ZONE_ID=Z1234567890ABC
    ADMIN_PASSWORD=YourSecurePassword
    ACME_EMAIL=admin@your-domain.com
    ```
@@ -49,11 +48,12 @@ Environment variables in `.env.<stack>`:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DOMAIN_NAME` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
-| `HOSTED_ZONE_ID` | Yes | - | Route53 hosted zone ID |
 | `ADMIN_PASSWORD` | Yes | - | Initial admin password |
 | `ACME_EMAIL` | Yes | - | Email for Let's Encrypt certificates |
 | `INSTANCE_TYPE` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
 | `KEY_NAME` | No | - | SSH key pair name for access |
+
+**Note:** The Route53 hosted zone is auto-discovered from the domain name. For `cloud.example.com`, it will search for zones: `cloud.example.com`, `example.com`.
 
 ## Resources Created
 
@@ -81,6 +81,8 @@ The user data script automatically:
 - `domainUrl` - Full HTTPS URL
 - `s3BucketName` - S3 bucket name for blob storage
 - `s3BucketArn` - S3 bucket ARN
+- `hostedZoneId` - Auto-discovered Route53 hosted zone ID
+- `hostedZoneName` - Auto-discovered Route53 hosted zone name
 
 ## Accessing OpenCloud
 
