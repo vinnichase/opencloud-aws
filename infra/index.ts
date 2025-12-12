@@ -10,6 +10,73 @@ const acmeEmail = config.require("acmeEmail");
 const instanceType = config.get("instanceType") || "t3.medium";
 const keyName = config.get("keyName"); // Optional: SSH key pair name
 
+// Get current AWS region
+const currentRegion = aws.getRegion({});
+
+// Create S3 bucket for OpenCloud blob storage
+const bucket = new aws.s3.Bucket("opencloud-storage", {
+    forceDestroy: true, // Allow bucket deletion even with objects (for dev/test)
+    tags: {
+        Name: "opencloud-storage",
+    },
+});
+
+// Block public access to the bucket
+const bucketPublicAccessBlock = new aws.s3.BucketPublicAccessBlock("opencloud-storage-public-access", {
+    bucket: bucket.id,
+    blockPublicAcls: true,
+    blockPublicPolicy: true,
+    ignorePublicAcls: true,
+    restrictPublicBuckets: true,
+});
+
+// CORS configuration for the bucket
+const bucketCors = new aws.s3.BucketCorsConfigurationV2("opencloud-storage-cors", {
+    bucket: bucket.id,
+    corsRules: [{
+        allowedHeaders: ["*"],
+        allowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
+        allowedOrigins: [pulumi.interpolate`https://${domainName}`],
+        exposeHeaders: ["ETag"],
+        maxAgeSeconds: 3600,
+    }],
+});
+
+// Create IAM user for S3 access
+const s3User = new aws.iam.User("opencloud-s3-user", {
+    name: "opencloud-s3-user",
+    tags: {
+        Name: "opencloud-s3-user",
+    },
+});
+
+// Create access key for the IAM user
+const s3AccessKey = new aws.iam.AccessKey("opencloud-s3-key", {
+    user: s3User.name,
+});
+
+// IAM policy for S3 bucket access
+const s3Policy = new aws.iam.UserPolicy("opencloud-s3-policy", {
+    user: s3User.name,
+    policy: pulumi.all([bucket.arn]).apply(([bucketArn]) => JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Effect: "Allow",
+            Action: [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBucket",
+                "s3:GetBucketLocation",
+            ],
+            Resource: [
+                bucketArn,
+                `${bucketArn}/*`,
+            ],
+        }],
+    })),
+});
+
 // Get the latest Amazon Linux 2023 AMI
 const ami = aws.ec2.getAmi({
     mostRecent: true,
@@ -64,7 +131,15 @@ const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
 });
 
 // User data script to install Docker and run OpenCloud
-const userData = pulumi.interpolate`#!/bin/bash
+const userData = pulumi.all([
+    domainName,
+    adminPassword,
+    acmeEmail,
+    bucket.bucket,
+    s3AccessKey.id,
+    s3AccessKey.secret,
+    currentRegion.then(r => r.name),
+]).apply(([domain, password, email, bucketName, accessKey, secretKey, region]) => `#!/bin/bash
 set -ex
 
 exec > >(tee /var/log/user-data.log) 2>&1
@@ -101,31 +176,37 @@ git clone https://github.com/opencloud-eu/opencloud-compose.git
 cd opencloud-compose
 
 # Create .env configuration
-cat > .env << EOF
+cat > .env << 'ENVEOF'
 # OpenCloud Configuration
-OC_DOMAIN=${domainName}
-INITIAL_ADMIN_PASSWORD=${adminPassword}
+OC_DOMAIN=${domain}
+INITIAL_ADMIN_PASSWORD=${password}
 
 # Traefik / Let's Encrypt
-TRAEFIK_ACME_MAIL=${acmeEmail}
+TRAEFIK_ACME_MAIL=${email}
 TRAEFIK_ACME_CASERVER=https://acme-v02.api.letsencrypt.org/directory
 
-# Compose files to use (base + traefik for SSL)
-COMPOSE_FILE=docker-compose.yml:traefik/opencloud.yml
+# Compose files to use (base + traefik + S3 storage)
+COMPOSE_FILE=docker-compose.yml:traefik/opencloud.yml:storage/decomposeds3.yml
 
-# Persistent storage
+# Persistent storage for config (data goes to S3)
 OC_CONFIG_DIR=/opt/opencloud/config
-OC_DATA_DIR=/opt/opencloud/data
+
+# S3 Storage Configuration
+DECOMPOSEDS3_ENDPOINT=https://s3.${region}.amazonaws.com
+DECOMPOSEDS3_REGION=${region}
+DECOMPOSEDS3_ACCESS_KEY=${accessKey}
+DECOMPOSEDS3_SECRET_KEY=${secretKey}
+DECOMPOSEDS3_BUCKET=${bucketName}
 
 # Logging
 LOG_LEVEL=info
-EOF
+ENVEOF
 
 # Start OpenCloud with Docker Compose
 docker compose up -d
 
 echo "OpenCloud deployment completed at $(date)"
-`;
+`);
 
 // Create the EC2 instance
 const instance = new aws.ec2.Instance("opencloud-instance", {
@@ -166,3 +247,5 @@ export const instanceId = instance.id;
 export const publicIp = eip.publicIp;
 export const publicDns = instance.publicDns;
 export const domainUrl = pulumi.interpolate`https://${domainName}`;
+export const s3BucketName = bucket.bucket;
+export const s3BucketArn = bucket.arn;
