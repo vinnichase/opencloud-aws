@@ -1,5 +1,6 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
+import * as random from "@pulumi/random";
 import * as dotenv from "dotenv";
 import * as path from "path";
 
@@ -10,15 +11,32 @@ dotenv.config({ path: envFile });
 
 // Configuration from environment variables
 const domainName = process.env.DOMAIN_NAME;
-const adminPassword = process.env.ADMIN_PASSWORD;
 const acmeEmail = process.env.ACME_EMAIL;
 const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
 const keyName = process.env.KEY_NAME;
 
 // Validate required configuration
 if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
-if (!adminPassword) throw new Error("ADMIN_PASSWORD is required in .env file");
 if (!acmeEmail) throw new Error("ACME_EMAIL is required in .env file");
+
+// Generate admin password
+const adminPassword = new random.RandomPassword("admin-password", {
+    length: 32,
+    special: true,
+    overrideSpecial: "!@#$%^&*",
+});
+
+// Store admin password in SSM Parameter Store
+const adminPasswordParam = new aws.ssm.Parameter("opencloud-admin-password", {
+    name: `/opencloud/${stackName}/admin-password`,
+    type: "SecureString",
+    value: adminPassword.result,
+    description: "OpenCloud admin password",
+    tags: {
+        Name: "opencloud-admin-password",
+        Stack: stackName,
+    },
+});
 
 // Find Route53 hosted zone by recursively searching domain parts
 async function findHostedZone(domain: string): Promise<aws.route53.GetZoneResult> {
@@ -167,7 +185,7 @@ const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
 // User data script to install Docker and run OpenCloud
 const userData = pulumi.all([
     domainName,
-    adminPassword,
+    adminPassword.result,
     acmeEmail,
     bucket.bucket,
     s3AccessKey.id,
@@ -287,3 +305,4 @@ export const publicDns = instance.publicDns;
 export const domainUrl = pulumi.interpolate`https://${domainName}`;
 export const s3BucketName = bucket.bucket;
 export const s3BucketArn = bucket.arn;
+export const adminPasswordSsmParam = adminPasswordParam.name;

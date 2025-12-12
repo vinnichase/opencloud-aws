@@ -29,9 +29,8 @@ Pulumi project to deploy OpenCloud on AWS EC2 with Route53 DNS and S3 storage us
 3. Edit the environment file with your values:
    ```bash
    # .env.dev
-   AWS_REGION=us-east-1
+   AWS_REGION=eu-central-1
    DOMAIN_NAME=cloud.your-domain.com
-   ADMIN_PASSWORD=YourSecurePassword
    ACME_EMAIL=admin@your-domain.com
    ```
 
@@ -48,12 +47,13 @@ Environment variables in `.env.<stack>`:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DOMAIN_NAME` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
-| `ADMIN_PASSWORD` | Yes | - | Initial admin password |
 | `ACME_EMAIL` | Yes | - | Email for Let's Encrypt certificates |
 | `INSTANCE_TYPE` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
 | `KEY_NAME` | No | - | SSH key pair name for access |
 
-**Note:** The Route53 hosted zone is auto-discovered from the domain name. For `cloud.example.com`, it will search for zones: `cloud.example.com`, `example.com`.
+**Notes:**
+- The Route53 hosted zone is auto-discovered from the domain name
+- Admin password is auto-generated and stored in SSM Parameter Store
 
 ## Resources Created
 
@@ -63,6 +63,7 @@ Environment variables in `.env.<stack>`:
 - Route53 A record
 - S3 bucket for blob storage
 - IAM user with S3 access
+- SSM Parameter (SecureString) for admin password
 
 ## What Gets Deployed
 
@@ -83,15 +84,22 @@ The user data script automatically:
 - `s3BucketArn` - S3 bucket ARN
 - `hostedZoneId` - Auto-discovered Route53 hosted zone ID
 - `hostedZoneName` - Auto-discovered Route53 hosted zone name
+- `adminPasswordSsmParam` - SSM parameter name for admin password
 
 ## Accessing OpenCloud
 
 After deployment completes (allow 5-10 minutes for initialization):
 
-1. Visit `https://cloud.your-domain.com`
-2. Login with:
+1. Get the admin password from SSM:
+   ```bash
+   aws ssm get-parameter --name /opencloud/dev/admin-password --with-decryption --query Parameter.Value --output text
+   ```
+
+2. Visit `https://cloud.your-domain.com`
+
+3. Login with:
    - Username: `admin`
-   - Password: (the ADMIN_PASSWORD you configured)
+   - Password: (from SSM parameter above)
 
 ## Monitoring Deployment
 
