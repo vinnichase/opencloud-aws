@@ -214,7 +214,39 @@ ln -sf /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-co
 # Add ec2-user to docker group
 usermod -aG docker ec2-user
 
-# Create persistent storage directories
+# Wait for EBS volume to be attached (device may appear as /dev/sdf or /dev/nvme1n1)
+echo "Waiting for EBS data volume..."
+while true; do
+    if [ -b /dev/nvme1n1 ]; then
+        DATA_DEVICE=/dev/nvme1n1
+        break
+    elif [ -b /dev/sdf ]; then
+        DATA_DEVICE=/dev/sdf
+        break
+    elif [ -b /dev/xvdf ]; then
+        DATA_DEVICE=/dev/xvdf
+        break
+    fi
+    sleep 1
+done
+echo "Found data volume at $DATA_DEVICE"
+
+# Format volume if it doesn't have a filesystem (first boot only)
+if ! blkid $DATA_DEVICE; then
+    echo "Formatting new data volume..."
+    mkfs.ext4 $DATA_DEVICE
+fi
+
+# Create mount point and mount the volume
+mkdir -p /opt/opencloud
+mount $DATA_DEVICE /opt/opencloud
+
+# Add to fstab for persistence across reboots
+if ! grep -q "/opt/opencloud" /etc/fstab; then
+    echo "$DATA_DEVICE /opt/opencloud ext4 defaults,nofail 0 2" >> /etc/fstab
+fi
+
+# Create subdirectories and set permissions
 mkdir -p /opt/opencloud/config
 mkdir -p /opt/opencloud/data
 chown -R 1000:1000 /opt/opencloud
@@ -276,6 +308,23 @@ const instance = new aws.ec2.Instance("opencloud-instance", {
     },
 });
 
+// Create persistent EBS volume for OpenCloud metadata (in same AZ as instance)
+const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
+    availabilityZone: instance.availabilityZone,
+    size: 20, // GB - adjust as needed for metadata storage
+    type: "gp3",
+    tags: {
+        Name: "opencloud-data-volume",
+    },
+});
+
+// Attach persistent data volume to instance
+const volumeAttachment = new aws.ec2.VolumeAttachment("opencloud-data-attachment", {
+    deviceName: "/dev/sdf",
+    volumeId: dataVolume.id,
+    instanceId: instance.id,
+});
+
 // Create an Elastic IP for stable addressing
 const eip = new aws.ec2.Eip("opencloud-eip", {
     instance: instance.id,
@@ -305,3 +354,5 @@ export const domainUrl = pulumi.interpolate`https://${domainName}`;
 export const s3BucketName = bucket.bucket;
 export const s3BucketArn = bucket.arn;
 export const adminPasswordSsmParam = adminPasswordParam.name;
+export const dataVolumeId = dataVolume.id;
+export const dataVolumeAttachmentId = volumeAttachment.id;
