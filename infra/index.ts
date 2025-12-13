@@ -62,36 +62,6 @@ const hostedZone = findHostedZone(domainName);
 // Get current AWS region
 const currentRegion = aws.getRegion({});
 
-// Create a provider for us-east-1 (required for CloudFront ACM certificates)
-const usEast1 = new aws.Provider("us-east-1", {
-    region: "us-east-1",
-    profile: process.env.AWS_PROFILE,
-});
-
-// Create ACM certificate for CloudFront (must be in us-east-1)
-const certificate = new aws.acm.Certificate("opencloud-cert", {
-    domainName: domainName,
-    validationMethod: "DNS",
-    tags: {
-        Name: "opencloud-cert",
-    },
-}, { provider: usEast1 });
-
-// Create DNS validation records
-const certValidationRecord = new aws.route53.Record("opencloud-cert-validation", {
-    zoneId: pulumi.output(hostedZone).apply(z => z.zoneId),
-    name: certificate.domainValidationOptions[0].resourceRecordName,
-    type: certificate.domainValidationOptions[0].resourceRecordType,
-    records: [certificate.domainValidationOptions[0].resourceRecordValue],
-    ttl: 60,
-});
-
-// Wait for certificate validation
-const certValidation = new aws.acm.CertificateValidation("opencloud-cert-validation", {
-    certificateArn: certificate.arn,
-    validationRecordFqdns: [certValidationRecord.fqdn],
-}, { provider: usEast1 });
-
 // Create S3 bucket for OpenCloud blob storage
 const bucket = new aws.s3.Bucket("opencloud-storage", {
     forceDestroy: true, // Allow bucket deletion even with objects (for dev/test)
@@ -254,15 +224,16 @@ cd /opt
 git clone https://github.com/opencloud-eu/opencloud-compose.git
 cd opencloud-compose
 
-# Create .env configuration (SSL handled by CloudFront)
+# Create .env configuration (Traefik handles SSL with Let's Encrypt)
 cat > .env << 'ENVEOF'
 # OpenCloud Configuration
 OC_DOMAIN=${domain}
 INITIAL_ADMIN_PASSWORD=${password}
 
-# Run without Traefik SSL - CloudFront handles HTTPS
-COMPOSE_FILE=docker-compose.yml:storage/decomposeds3.yml:docker-compose.override.yml
-INSECURE=true
+# Use Traefik for SSL termination with Let's Encrypt
+COMPOSE_FILE=docker-compose.yml:storage/decomposeds3.yml:traefik/opencloud.yml
+TRAEFIK_ACME_MAIL=admin@${domain}
+TRAEFIK_SERVICES_TLS_CONFIG=tls.certresolver=letsencrypt
 
 # Persistent storage for config (data goes to S3)
 OC_CONFIG_DIR=/opt/opencloud/config
@@ -277,14 +248,6 @@ DECOMPOSEDS3_BUCKET=${bucketName}
 # Logging
 LOG_LEVEL=info
 ENVEOF
-
-# Create override to expose port 9200 to host port 80 (for CloudFront)
-cat > docker-compose.override.yml << 'OVERRIDEEOF'
-services:
-  opencloud:
-    ports:
-      - "80:9200"
-OVERRIDEEOF
 
 # Start OpenCloud with Docker Compose
 docker compose up -d
@@ -318,60 +281,13 @@ const eip = new aws.ec2.Eip("opencloud-eip", {
     },
 });
 
-// Create CloudFront distribution
-const cdn = new aws.cloudfront.Distribution("opencloud-cdn", {
-    enabled: true,
-    aliases: [domainName],
-
-    origins: [{
-        domainName: eip.publicDns,
-        originId: "ec2",
-        customOriginConfig: {
-            httpPort: 80,
-            httpsPort: 443,
-            originProtocolPolicy: "http-only",
-            originSslProtocols: ["TLSv1.2"],
-        },
-    }],
-
-    defaultCacheBehavior: {
-        targetOriginId: "ec2",
-        viewerProtocolPolicy: "redirect-to-https",
-        allowedMethods: ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
-        cachedMethods: ["GET", "HEAD"],
-        compress: true,
-        // Disable caching - pass all requests to origin
-        cachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
-        originRequestPolicyId: "216adef6-5c7f-47e4-b989-5492eafa07d3", // AllViewer
-    },
-
-    restrictions: {
-        geoRestriction: {
-            restrictionType: "none",
-        },
-    },
-
-    viewerCertificate: {
-        acmCertificateArn: certValidation.certificateArn,
-        sslSupportMethod: "sni-only",
-        minimumProtocolVersion: "TLSv1.2_2021",
-    },
-
-    tags: {
-        Name: "opencloud-cdn",
-    },
-});
-
-// Create Route53 DNS record pointing to CloudFront
+// Create Route53 DNS record pointing directly to EIP
 export const dnsRecord = new aws.route53.Record("opencloud-dns", {
     zoneId: pulumi.output(hostedZone).apply(z => z.zoneId),
     name: domainName,
     type: "A",
-    aliases: [{
-        name: cdn.domainName,
-        zoneId: cdn.hostedZoneId,
-        evaluateTargetHealth: false,
-    }],
+    ttl: 300,
+    records: [eip.publicIp],
 });
 
 // Export the discovered hosted zone
@@ -386,5 +302,3 @@ export const domainUrl = pulumi.interpolate`https://${domainName}`;
 export const s3BucketName = bucket.bucket;
 export const s3BucketArn = bucket.arn;
 export const adminPasswordSsmParam = adminPasswordParam.name;
-export const cloudfrontDomain = cdn.domainName;
-export const certificateArn = certificate.arn;
