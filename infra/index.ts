@@ -284,8 +284,9 @@ TRAEFIK_SERVICES_TLS_CONFIG=tls.certresolver=letsencrypt
 # Enable basic auth for desktop/mobile clients
 PROXY_ENABLE_BASIC_AUTH=true
 
-# Persistent storage for config (data goes to S3)
+# Persistent storage for config and metadata (blobs go to S3)
 OC_CONFIG_DIR=/opt/opencloud/config
+OC_DATA_DIR=/opt/opencloud/data
 
 # S3 Storage Configuration
 DECOMPOSEDS3_ENDPOINT=https://s3.${region}.amazonaws.com
