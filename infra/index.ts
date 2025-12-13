@@ -64,11 +64,11 @@ const currentRegion = aws.getRegion({});
 
 // Create S3 bucket for OpenCloud blob storage
 const bucket = new aws.s3.Bucket("opencloud-storage", {
-    forceDestroy: true, // Allow bucket deletion even with objects (for dev/test)
+    forceDestroy: false,
     tags: {
         Name: "opencloud-storage",
     },
-});
+}, { retainOnDelete: true });
 
 // Block public access to the bucket
 const bucketPublicAccessBlock = new aws.s3.BucketPublicAccessBlock("opencloud-storage-public-access", {
@@ -316,7 +316,7 @@ const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
     tags: {
         Name: "opencloud-data-volume",
     },
-});
+}, { retainOnDelete: true });
 
 // Attach persistent data volume to instance
 const volumeAttachment = new aws.ec2.VolumeAttachment("opencloud-data-attachment", {
