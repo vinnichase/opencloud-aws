@@ -1,5 +1,7 @@
 # OpenCloud Infrastructure
 
+![GitHub](opencloud-github-badge.png)
+
 Pulumi project to deploy OpenCloud on AWS with Traefik (Let's Encrypt SSL), S3 storage, and optional spot instances for cost savings using the official [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) repository.
 
 ## Prerequisites
