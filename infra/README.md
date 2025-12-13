@@ -11,36 +11,57 @@ Pulumi project to deploy OpenCloud on AWS with Traefik (Let's Encrypt SSL), S3 s
 
 ## Setup
 
-1. Install dependencies:
-   ```bash
-   cd infra
-   pnpm install
-   ```
+### 1. Configure Pulumi S3 Backend (Recommended)
 
-2. Create your environment file (one per stack):
-   ```bash
-   # For dev stack
-   cp .env.sample .env.dev
+Instead of using Pulumi Cloud, you can store state in your own S3 bucket:
 
-   # For prod stack
-   cp .env.sample .env.prod
-   ```
+```bash
+# Create S3 bucket with versioning, encryption, and passphrase in SSM
+./pulumi-state-bucket.sh pulumi-state-<account-id> eu-central-1
 
-3. Edit the environment file with your values:
-   ```bash
-   # .env.prod
-   AWS_PROFILE=default
-   AWS_REGION=eu-central-1
-   DOMAIN_NAME=cloud.your-domain.com
-   KEY_NAME=your-ssh-key
-   USE_SPOT_INSTANCE=true  # Optional: ~70% cost savings
-   ```
+# Login to S3 backend
+export PULUMI_CONFIG_PASSPHRASE=$(aws ssm get-parameter \
+  --name /pulumi/pulumi-state-<account-id>/config-passphrase \
+  --with-decryption --query Parameter.Value --output text)
+pulumi login s3://pulumi-state-<account-id>
+```
 
-4. Initialize and deploy:
-   ```bash
-   pulumi stack init prod
-   pulumi up
-   ```
+The script creates:
+- S3 bucket with versioning enabled
+- Public access blocked
+- Server-side encryption (AES256)
+- Config passphrase stored in SSM Parameter Store
+
+### 2. Install dependencies:
+```bash
+cd infra
+pnpm install
+```
+
+### 3. Create your environment file (one per stack):
+```bash
+# For dev stack
+cp .env.sample .env.dev
+
+# For prod stack
+cp .env.sample .env.prod
+```
+
+### 4. Edit the environment file with your values:
+```bash
+# .env.prod
+AWS_PROFILE=default
+AWS_REGION=eu-central-1
+DOMAIN_NAME=cloud.your-domain.com
+KEY_NAME=your-ssh-key
+USE_SPOT_INSTANCE=true  # Optional: ~70% cost savings
+```
+
+### 5. Initialize and deploy:
+```bash
+pulumi stack init prod
+pulumi up
+```
 
 ## Configuration Options
 
