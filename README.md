@@ -83,6 +83,7 @@ Pulumi config in `Pulumi.<stack>.yaml`:
 | `opencloud:instanceType` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
 | `opencloud:keyName` | No | - | SSH key pair name for access |
 | `opencloud:useSpotInstance` | No | `false` | Use spot instances for ~70% cost savings |
+| `opencloud:openSshPort` | No | `false` | Open SSH port for debugging |
 
 **Notes:**
 - Route53 hosted zone is auto-discovered from the domain name
