@@ -20,5 +20,9 @@ config:
   # Spot instances can be interrupted but ASG auto-recovers in ~1-2 minutes
   opencloud:useSpotInstance: false
 
+  # SSH Access (optional)
+  # Set to true to allow SSH access to the instance (not recommended for production)
+  opencloud:openSshPort: false
+
 # Note: Admin password is auto-generated and stored in AWS SSM Parameter Store
 # Retrieve it with: aws ssm get-parameter --name /opencloud/<stack>/admin-password --with-decryption

@@ -11,6 +11,7 @@ const domainName = config.require("domainName");
 const instanceType = config.get("instanceType") || "t4g.micro";
 const keyName = config.get("keyName");
 const useSpotInstance = config.getBoolean("useSpotInstance") || false;
+const openSshPort = config.getBoolean("openSshPort") || false;
 
 // Common tags for cost allocation and resource identification
 const commonTags = {
@@ -242,13 +243,13 @@ const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
     description: "Security group for OpenCloud EC2 instance",
     ingress: [
         // SSH
-        {
+        ...openSshPort ? [{
             protocol: "tcp",
             fromPort: 22,
             toPort: 22,
             cidrBlocks: ["0.0.0.0/0"],
             description: "SSH access",
-        },
+        }] : [],
         // HTTP
         {
             protocol: "tcp",
