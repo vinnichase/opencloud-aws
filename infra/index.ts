@@ -231,15 +231,26 @@ while true; do
 done
 echo "Found data volume at $DATA_DEVICE"
 
-# Format volume if it doesn't have a filesystem (first boot only)
-if ! blkid $DATA_DEVICE; then
-    echo "Formatting new data volume..."
-    mkfs.ext4 $DATA_DEVICE
-fi
-
-# Create mount point and mount the volume
+# Create mount point
 mkdir -p /opt/opencloud
-mount $DATA_DEVICE /opt/opencloud
+
+# Try to mount the volume - if it fails, format it (first boot only)
+if mount $DATA_DEVICE /opt/opencloud 2>/dev/null; then
+    echo "Mounted existing data volume"
+    # Verify it's a valid OpenCloud volume by checking for marker
+    if [ -f /opt/opencloud/.opencloud-volume ]; then
+        echo "Valid OpenCloud data volume detected - preserving data"
+    else
+        echo "WARNING: Volume mounted but no marker found - may be uninitialized"
+    fi
+else
+    echo "Mount failed - formatting new data volume..."
+    mkfs.ext4 $DATA_DEVICE
+    mount $DATA_DEVICE /opt/opencloud
+    # Create marker file to identify this as an initialized OpenCloud volume
+    touch /opt/opencloud/.opencloud-volume
+    echo "Created new OpenCloud data volume"
+fi
 
 # Add to fstab for persistence across reboots
 if ! grep -q "/opt/opencloud" /etc/fstab; then
@@ -250,6 +261,9 @@ fi
 mkdir -p /opt/opencloud/config
 mkdir -p /opt/opencloud/data
 chown -R 1000:1000 /opt/opencloud
+
+# Ensure marker exists (in case of upgrade from older setup)
+touch /opt/opencloud/.opencloud-volume
 
 # Clone OpenCloud Compose repository
 cd /opt
@@ -290,10 +304,16 @@ docker compose up -d
 echo "OpenCloud deployment completed at $(date)"
 `);
 
-// Create the EC2 instance
+// Get first available AZ for consistent placement of instance and volume
+const dataAvailabilityZone = aws.getAvailabilityZones({
+    state: "available",
+}).then(azs => azs.names[0]);
+
+// Create the EC2 instance (pinned to same AZ as data volume)
 const instance = new aws.ec2.Instance("opencloud-instance", {
     ami: ami.then((a: aws.ec2.GetAmiResult) => a.id),
     instanceType: instanceType,
+    availabilityZone: dataAvailabilityZone,
     vpcSecurityGroupIds: [securityGroup.id],
     keyName: keyName,
     userData: userData,
@@ -308,9 +328,9 @@ const instance = new aws.ec2.Instance("opencloud-instance", {
     },
 });
 
-// Create persistent EBS volume for OpenCloud metadata (in same AZ as instance)
+// Create persistent EBS volume for OpenCloud metadata (same AZ as instance)
 const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
-    availabilityZone: instance.availabilityZone,
+    availabilityZone: dataAvailabilityZone,
     size: 20, // GB - adjust as needed for metadata storage
     type: "gp3",
     tags: {
@@ -319,11 +339,13 @@ const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
 }, { retainOnDelete: true });
 
 // Attach persistent data volume to instance
+// deleteBeforeReplace ensures volume is detached before attaching to new instance
 const volumeAttachment = new aws.ec2.VolumeAttachment("opencloud-data-attachment", {
     deviceName: "/dev/sdf",
     volumeId: dataVolume.id,
     instanceId: instance.id,
-});
+    forceDetach: true,
+}, { deleteBeforeReplace: true });
 
 // Create an Elastic IP for stable addressing
 const eip = new aws.ec2.Eip("opencloud-eip", {
