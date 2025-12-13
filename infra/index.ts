@@ -146,6 +146,105 @@ const ami = aws.ec2.getAmi({
     ],
 });
 
+// Get first available AZ for consistent placement of instance and volume
+const dataAvailabilityZone = aws.getAvailabilityZones({
+    state: "available",
+}).then(azs => azs.names[0]);
+
+// Configuration for spot vs on-demand instances
+const useSpotInstance = process.env.USE_SPOT_INSTANCE === "true";
+
+// Create persistent EBS volume for OpenCloud metadata (created early so we can reference in user data)
+const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
+    availabilityZone: dataAvailabilityZone,
+    size: 20, // GB - adjust as needed for metadata storage
+    type: "gp3",
+    tags: {
+        ...commonTags,
+        Name: "opencloud-data-volume",
+    },
+}, { retainOnDelete: true });
+
+// Create an Elastic IP for stable addressing (not attached to instance - ASG instances attach it themselves)
+const eip = new aws.ec2.Eip("opencloud-eip", {
+    tags: {
+        ...commonTags,
+        Name: "opencloud-eip",
+    },
+});
+
+// IAM role for EC2 instances to self-attach EIP and EBS volume
+const instanceRole = new aws.iam.Role("opencloud-instance-role", {
+    assumeRolePolicy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Action: "sts:AssumeRole",
+            Effect: "Allow",
+            Principal: {
+                Service: "ec2.amazonaws.com",
+            },
+        }],
+    }),
+    tags: {
+        ...commonTags,
+        Name: "opencloud-instance-role",
+    },
+});
+
+// Policy allowing instance to attach EIP and EBS volume to itself
+const instancePolicy = new aws.iam.RolePolicy("opencloud-instance-policy", {
+    role: instanceRole.id,
+    policy: pulumi.all([eip.allocationId, dataVolume.id]).apply(([eipAllocationId, volumeId]) => JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+            {
+                Sid: "AllowEIPAssociation",
+                Effect: "Allow",
+                Action: [
+                    "ec2:AssociateAddress",
+                    "ec2:DisassociateAddress",
+                ],
+                Resource: [
+                    `arn:aws:ec2:*:*:elastic-ip/${eipAllocationId}`,
+                    "arn:aws:ec2:*:*:instance/*",
+                    "arn:aws:ec2:*:*:network-interface/*",
+                ],
+            },
+            {
+                Sid: "AllowVolumeAttachment",
+                Effect: "Allow",
+                Action: [
+                    "ec2:AttachVolume",
+                    "ec2:DetachVolume",
+                ],
+                Resource: [
+                    `arn:aws:ec2:*:*:volume/${volumeId}`,
+                    "arn:aws:ec2:*:*:instance/*",
+                ],
+            },
+            {
+                Sid: "AllowDescribe",
+                Effect: "Allow",
+                Action: [
+                    "ec2:DescribeVolumes",
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeAddresses",
+                ],
+                Resource: "*",
+            },
+        ],
+    })),
+});
+
+// Instance profile to attach the role to EC2 instances
+const instanceProfile = new aws.iam.InstanceProfile("opencloud-instance-profile", {
+    role: instanceRole.name,
+    tags: {
+        ...commonTags,
+        Name: "opencloud-instance-profile",
+    },
+});
+
 // Create a security group for the EC2 instance
 const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
     description: "Security group for OpenCloud EC2 instance",
@@ -191,6 +290,7 @@ const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
 });
 
 // User data script to install Docker and run OpenCloud
+// Includes self-attachment of EIP and EBS volume for ASG auto-recovery
 const userData = pulumi.all([
     domainName,
     adminPassword.result,
@@ -198,10 +298,38 @@ const userData = pulumi.all([
     s3AccessKey.id,
     s3AccessKey.secret,
     currentRegion.then(r => r.name),
-]).apply(([domain, password, bucketName, accessKey, secretKey, region]) => `#!/bin/bash
+    eip.allocationId,
+    dataVolume.id,
+]).apply(([domain, password, bucketName, accessKey, secretKey, region, eipAllocationId, dataVolumeId]) => `#!/bin/bash
 set -ex
 
 exec > >(tee /var/log/user-data.log) 2>&1
+
+# Get instance metadata
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+AVAILABILITY_ZONE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+REGION=$(echo $AVAILABILITY_ZONE | sed 's/[a-z]$//')
+
+echo "Instance ID: $INSTANCE_ID"
+echo "Region: $REGION"
+
+# Associate Elastic IP to this instance
+echo "Associating Elastic IP..."
+aws ec2 associate-address --instance-id $INSTANCE_ID --allocation-id ${eipAllocationId} --region $REGION || true
+
+# Attach EBS data volume to this instance
+echo "Attaching EBS data volume..."
+# First, check if volume is attached elsewhere and detach if needed
+CURRENT_ATTACHMENT=$(aws ec2 describe-volumes --volume-ids ${dataVolumeId} --region $REGION --query 'Volumes[0].Attachments[0].InstanceId' --output text)
+if [ "$CURRENT_ATTACHMENT" != "None" ] && [ "$CURRENT_ATTACHMENT" != "$INSTANCE_ID" ]; then
+    echo "Volume attached to $CURRENT_ATTACHMENT, detaching..."
+    aws ec2 detach-volume --volume-id ${dataVolumeId} --region $REGION --force || true
+    sleep 10
+fi
+
+# Attach volume to this instance
+aws ec2 attach-volume --volume-id ${dataVolumeId} --instance-id $INSTANCE_ID --device /dev/sdf --region $REGION || true
 
 # Update system
 dnf update -y
@@ -226,6 +354,7 @@ usermod -aG docker ec2-user
 
 # Wait for EBS volume to be attached (device may appear as /dev/sdf or /dev/nvme1n1)
 echo "Waiting for EBS data volume..."
+WAIT_COUNT=0
 while true; do
     if [ -b /dev/nvme1n1 ]; then
         DATA_DEVICE=/dev/nvme1n1
@@ -236,6 +365,11 @@ while true; do
     elif [ -b /dev/xvdf ]; then
         DATA_DEVICE=/dev/xvdf
         break
+    fi
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+    if [ $WAIT_COUNT -gt 60 ]; then
+        echo "Timeout waiting for EBS volume"
+        exit 1
     fi
     sleep 1
 done
@@ -317,62 +451,90 @@ docker compose up -d
 echo "OpenCloud deployment completed at $(date)"
 `);
 
-// Get first available AZ for consistent placement of instance and volume
-const dataAvailabilityZone = aws.getAvailabilityZones({
-    state: "available",
-}).then(azs => azs.names[0]);
+// Get default VPC for ASG
+const defaultVpc = aws.ec2.getVpc({ default: true });
 
-// Create the EC2 instance (pinned to same AZ as data volume)
-const instance = new aws.ec2.Instance("opencloud-instance", {
-    ami: ami.then((a: aws.ec2.GetAmiResult) => a.id),
+// Get subnet in the same AZ as our EBS volume
+const asgSubnetId = pulumi.all([defaultVpc, dataAvailabilityZone]).apply(async ([vpc, az]) => {
+    const subnet = await aws.ec2.getSubnet({
+        filters: [
+            { name: "vpc-id", values: [vpc.id] },
+            { name: "availability-zone", values: [az] },
+            { name: "default-for-az", values: ["true"] },
+        ],
+    });
+    return subnet.id;
+});
+
+// Create Launch Template for ASG
+const launchTemplate = new aws.ec2.LaunchTemplate("opencloud-launch-template", {
+    imageId: ami.then(a => a.id),
     instanceType: instanceType,
-    availabilityZone: dataAvailabilityZone,
-    vpcSecurityGroupIds: [securityGroup.id],
     keyName: keyName,
-    userData: userData,
-    userDataReplaceOnChange: true,
-    rootBlockDevice: {
-        volumeSize: 30,
-        volumeType: "gp3",
-        deleteOnTermination: true,
-        tags: {
-            ...commonTags,
-            Name: "opencloud-root-volume",
-        },
+    vpcSecurityGroupIds: [securityGroup.id],
+    userData: userData.apply(ud => Buffer.from(ud).toString("base64")),
+    iamInstanceProfile: {
+        arn: instanceProfile.arn,
     },
+    // Spot instance configuration
+    instanceMarketOptions: useSpotInstance ? {
+        marketType: "spot",
+        spotOptions: {
+            spotInstanceType: "one-time",
+            instanceInterruptionBehavior: "terminate",
+        },
+    } : undefined,
+    blockDeviceMappings: [{
+        deviceName: "/dev/xvda",
+        ebs: {
+            volumeSize: 30,
+            volumeType: "gp3",
+            deleteOnTermination: "true",
+        },
+    }],
+    tagSpecifications: [
+        {
+            resourceType: "instance",
+            tags: {
+                ...commonTags,
+                Name: "opencloud-instance",
+            },
+        },
+        {
+            resourceType: "volume",
+            tags: {
+                ...commonTags,
+                Name: "opencloud-root-volume",
+            },
+        },
+    ],
     tags: {
         ...commonTags,
-        Name: "opencloud-instance",
+        Name: "opencloud-launch-template",
     },
 });
 
-// Create persistent EBS volume for OpenCloud metadata (same AZ as instance)
-const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
-    availabilityZone: dataAvailabilityZone,
-    size: 20, // GB - adjust as needed for metadata storage
-    type: "gp3",
-    tags: {
-        ...commonTags,
-        Name: "opencloud-data-volume",
+// Create Auto Scaling Group for automatic recovery
+const asg = new aws.autoscaling.Group("opencloud-asg", {
+    name: "opencloud-asg",
+    minSize: 1,
+    maxSize: 1,
+    desiredCapacity: 1,
+    vpcZoneIdentifiers: [asgSubnetId],
+    launchTemplate: {
+        id: launchTemplate.id,
+        version: "$Latest",
     },
-}, { retainOnDelete: true });
-
-// Attach persistent data volume to instance
-// deleteBeforeReplace ensures volume is detached before attaching to new instance
-const volumeAttachment = new aws.ec2.VolumeAttachment("opencloud-data-attachment", {
-    deviceName: "/dev/sdf",
-    volumeId: dataVolume.id,
-    instanceId: instance.id,
-    forceDetach: true,
-}, { deleteBeforeReplace: true });
-
-// Create an Elastic IP for stable addressing
-const eip = new aws.ec2.Eip("opencloud-eip", {
-    instance: instance.id,
-    tags: {
-        ...commonTags,
-        Name: "opencloud-eip",
-    },
+    healthCheckType: "EC2",
+    healthCheckGracePeriod: 300,
+    tags: [
+        { key: "Name", value: "opencloud-instance", propagateAtLaunch: true },
+        { key: "Project", value: "opencloud", propagateAtLaunch: true },
+        { key: "Environment", value: stackName, propagateAtLaunch: true },
+        { key: "ManagedBy", value: "pulumi", propagateAtLaunch: true },
+    ],
+    // Wait for instance to be healthy before considering update complete
+    waitForCapacityTimeout: "10m",
 });
 
 // Create Route53 DNS record pointing directly to EIP
@@ -389,12 +551,11 @@ export const hostedZoneId = pulumi.output(hostedZone).apply(z => z.zoneId);
 export const hostedZoneName = pulumi.output(hostedZone).apply(z => z.name);
 
 // Exports
-export const instanceId = instance.id;
+export const asgName = asg.name;
+export const launchTemplateId = launchTemplate.id;
 export const publicIp = eip.publicIp;
-export const publicDns = instance.publicDns;
 export const domainUrl = pulumi.interpolate`https://${domainName}`;
 export const s3BucketName = bucket.bucket;
 export const s3BucketArn = bucket.arn;
 export const adminPasswordSsmParam = adminPasswordParam.name;
 export const dataVolumeId = dataVolume.id;
-export const dataVolumeAttachmentId = volumeAttachment.id;
