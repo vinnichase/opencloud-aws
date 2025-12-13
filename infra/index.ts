@@ -1,21 +1,16 @@
 import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 import * as random from "@pulumi/random";
-import * as dotenv from "dotenv";
-import * as path from "path";
 
-// Load environment variables from stack-specific .env file
+// Stack configuration
 const stackName = pulumi.getStack();
-const envFile = path.join(__dirname, `.env.${stackName}`);
-dotenv.config({ path: envFile });
+const config = new pulumi.Config("opencloud");
 
-// Configuration from environment variables
-const domainName = process.env.DOMAIN_NAME;
-const instanceType = process.env.INSTANCE_TYPE || "t4g.micro";
-const keyName = process.env.KEY_NAME;
-
-// Validate required configuration
-if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
+// Configuration from Pulumi config
+const domainName = config.require("domainName");
+const instanceType = config.get("instanceType") || "t4g.micro";
+const keyName = config.get("keyName");
+const useSpotInstance = config.getBoolean("useSpotInstance") || false;
 
 // Common tags for cost allocation and resource identification
 const commonTags = {
@@ -150,9 +145,6 @@ const ami = aws.ec2.getAmi({
 const dataAvailabilityZone = aws.getAvailabilityZones({
     state: "available",
 }).then(azs => azs.names[0]);
-
-// Configuration for spot vs on-demand instances
-const useSpotInstance = process.env.USE_SPOT_INSTANCE === "true";
 
 // Create persistent EBS volume for OpenCloud metadata (created early so we can reference in user data)
 const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {

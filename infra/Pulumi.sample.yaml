@@ -1,0 +1,24 @@
+# OpenCloud Pulumi Stack Configuration
+# Copy this file to Pulumi.<stack>.yaml (e.g., Pulumi.prod.yaml)
+# Then run: pulumi stack init <stack>
+
+config:
+  # AWS Configuration
+  aws:region: eu-central-1
+  # aws:profile: default  # Optional: AWS CLI profile
+
+  # Domain Configuration (required)
+  # Route53 hosted zone is auto-discovered from the domain name
+  opencloud:domainName: cloud.example.com
+
+  # EC2 Configuration
+  # opencloud:instanceType: t4g.micro  # Default: t4g.micro (ARM Graviton)
+  opencloud:keyName: your-ssh-key-name
+
+  # Spot Instances (optional)
+  # Set to true for ~70% cost savings on compute
+  # Spot instances can be interrupted but ASG auto-recovers in ~1-2 minutes
+  opencloud:useSpotInstance: false
+
+# Note: Admin password is auto-generated and stored in AWS SSM Parameter Store
+# Retrieve it with: aws ssm get-parameter --name /opencloud/<stack>/admin-password --with-decryption

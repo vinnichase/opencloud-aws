@@ -6,10 +6,11 @@ bin/
 
 # Pulumi
 .pulumi/
+Pulumi.*.yaml
+!Pulumi.sample.yaml
 
-# Environment (keep .env.sample)
+# Environment files (legacy, use Pulumi config instead)
 .env*
-!.env.sample
 
 # IDE
 .idea/

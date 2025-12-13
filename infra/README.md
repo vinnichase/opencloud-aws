@@ -38,43 +38,49 @@ cd infra
 pnpm install
 ```
 
-### 3. Create your environment file (one per stack):
+### 3. Initialize a stack and configure:
 ```bash
-# For dev stack
-cp .env.sample .env.dev
-
-# For prod stack
-cp .env.sample .env.prod
-```
-
-### 4. Edit the environment file with your values:
-```bash
-# .env.prod
-AWS_PROFILE=default
-AWS_REGION=eu-central-1
-DOMAIN_NAME=cloud.your-domain.com
-KEY_NAME=your-ssh-key
-USE_SPOT_INSTANCE=true  # Optional: ~70% cost savings
-```
-
-### 5. Initialize and deploy:
-```bash
+# Initialize stack
 pulumi stack init prod
+
+# Copy sample config and edit
+cp Pulumi.sample.yaml Pulumi.prod.yaml
+```
+
+### 4. Edit `Pulumi.prod.yaml` with your values:
+```yaml
+config:
+  aws:region: eu-central-1
+  opencloud:domainName: cloud.your-domain.com
+  opencloud:keyName: your-ssh-key
+  opencloud:useSpotInstance: true  # Optional: ~70% cost savings
+```
+
+Or use the CLI:
+```bash
+pulumi config set aws:region eu-central-1
+pulumi config set opencloud:domainName cloud.your-domain.com
+pulumi config set opencloud:keyName your-ssh-key
+pulumi config set opencloud:useSpotInstance true
+```
+
+### 5. Deploy:
+```bash
 pulumi up
 ```
 
 ## Configuration Options
 
-Environment variables in `.env.<stack>`:
+Pulumi config in `Pulumi.<stack>.yaml`:
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `AWS_PROFILE` | No | `default` | AWS CLI profile to use |
-| `AWS_REGION` | No | - | AWS region for EC2 and S3 |
-| `DOMAIN_NAME` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
-| `INSTANCE_TYPE` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
-| `KEY_NAME` | No | - | SSH key pair name for access |
-| `USE_SPOT_INSTANCE` | No | `false` | Use spot instances for ~70% cost savings |
+| Config Key | Required | Default | Description |
+|------------|----------|---------|-------------|
+| `aws:region` | Yes | - | AWS region for EC2 and S3 |
+| `aws:profile` | No | `default` | AWS CLI profile to use |
+| `opencloud:domainName` | Yes | - | Domain name for OpenCloud (e.g., cloud.example.com) |
+| `opencloud:instanceType` | No | `t4g.micro` | EC2 instance type (ARM Graviton) |
+| `opencloud:keyName` | No | - | SSH key pair name for access |
+| `opencloud:useSpotInstance` | No | `false` | Use spot instances for ~70% cost savings |
 
 **Notes:**
 - Route53 hosted zone is auto-discovered from the domain name
@@ -181,11 +187,17 @@ When `USE_SPOT_INSTANCE=true`:
 
 ## Multiple Environments
 
-Create separate `.env` files for each environment:
-```
-.env.dev      # Development
-.env.staging  # Staging
-.env.prod     # Production
+Create separate stack configs for each environment:
+```bash
+# Initialize stacks
+pulumi stack init dev
+pulumi stack init staging
+pulumi stack init prod
+
+# Copy and configure each
+cp Pulumi.sample.yaml Pulumi.dev.yaml
+cp Pulumi.sample.yaml Pulumi.staging.yaml
+cp Pulumi.sample.yaml Pulumi.prod.yaml
 ```
 
 Switch stacks with:
