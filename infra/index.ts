@@ -235,6 +235,9 @@ COMPOSE_FILE=docker-compose.yml:storage/decomposeds3.yml:traefik/opencloud.yml
 TRAEFIK_ACME_MAIL=admin@${domain}
 TRAEFIK_SERVICES_TLS_CONFIG=tls.certresolver=letsencrypt
 
+# Enable basic auth for desktop/mobile clients
+PROXY_ENABLE_BASIC_AUTH=true
+
 # Persistent storage for config (data goes to S3)
 OC_CONFIG_DIR=/opt/opencloud/config
 
