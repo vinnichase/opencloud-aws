@@ -17,6 +17,13 @@ const keyName = process.env.KEY_NAME;
 // Validate required configuration
 if (!domainName) throw new Error("DOMAIN_NAME is required in .env file");
 
+// Common tags for cost allocation and resource identification
+const commonTags = {
+    Project: "opencloud",
+    Environment: stackName,
+    ManagedBy: "pulumi",
+};
+
 // Generate admin password
 const adminPassword = new random.RandomPassword("admin-password", {
     length: 32,
@@ -31,8 +38,8 @@ const adminPasswordParam = new aws.ssm.Parameter("opencloud-admin-password", {
     value: adminPassword.result,
     description: "OpenCloud admin password",
     tags: {
+        ...commonTags,
         Name: "opencloud-admin-password",
-        Stack: stackName,
     },
 });
 
@@ -66,6 +73,7 @@ const currentRegion = aws.getRegion({});
 const bucket = new aws.s3.Bucket("opencloud-storage", {
     forceDestroy: false,
     tags: {
+        ...commonTags,
         Name: "opencloud-storage",
     },
 }, { retainOnDelete: true });
@@ -95,6 +103,7 @@ const bucketCors = new aws.s3.BucketCorsConfigurationV2("opencloud-storage-cors"
 const s3User = new aws.iam.User("opencloud-s3-user", {
     name: "opencloud-s3-user",
     tags: {
+        ...commonTags,
         Name: "opencloud-s3-user",
     },
 });
@@ -176,6 +185,7 @@ const securityGroup = new aws.ec2.SecurityGroup("opencloud-sg", {
         },
     ],
     tags: {
+        ...commonTags,
         Name: "opencloud-sg",
     },
 });
@@ -325,8 +335,13 @@ const instance = new aws.ec2.Instance("opencloud-instance", {
         volumeSize: 30,
         volumeType: "gp3",
         deleteOnTermination: true,
+        tags: {
+            ...commonTags,
+            Name: "opencloud-root-volume",
+        },
     },
     tags: {
+        ...commonTags,
         Name: "opencloud-instance",
     },
 });
@@ -337,6 +352,7 @@ const dataVolume = new aws.ebs.Volume("opencloud-data-volume", {
     size: 20, // GB - adjust as needed for metadata storage
     type: "gp3",
     tags: {
+        ...commonTags,
         Name: "opencloud-data-volume",
     },
 }, { retainOnDelete: true });
@@ -354,6 +370,7 @@ const volumeAttachment = new aws.ec2.VolumeAttachment("opencloud-data-attachment
 const eip = new aws.ec2.Eip("opencloud-eip", {
     instance: instance.id,
     tags: {
+        ...commonTags,
         Name: "opencloud-eip",
     },
 });
