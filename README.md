@@ -220,3 +220,112 @@ pulumi destroy
 aws s3 rb s3://opencloud-storage-xxxxx --force
 aws ec2 delete-volume --volume-id vol-xxxxx
 ```
+
+## macOS Client: Mount & Sync Script
+
+The `scripts/opencloud-mount.sh` script provides WebDAV mounting and bidirectional sync for macOS using rclone.
+
+### Prerequisites
+
+```bash
+brew install rclone
+```
+
+### Quick Start
+
+```bash
+cd scripts
+
+# 1. Configure remote connection
+./opencloud-mount.sh setup
+
+# 2. Mount WebDAV share (optional, for browsing all files)
+./opencloud-mount.sh mount
+
+# 3. Add a sync destination (for fast local access to specific folders)
+#    "ableton" is just an example name - use any name you like
+./opencloud-mount.sh install ableton
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `setup` | Configure rclone remote (server URL, credentials, mount point, cache size) |
+| `mount` | Mount WebDAV share to local folder |
+| `unmount` | Unmount the share |
+| `install <name>` | Add sync destination and install launchd service |
+| `uninstall <name>` | Remove launchd service for destination |
+| `sync` | Run all syncs manually |
+| `sync <name>` | Run sync for specific destination |
+| `sync ls` | List all sync destinations |
+| `sync rm <name>` | Remove destination from config |
+| `resync <name> [mode]` | Full resync with mode: `local`, `remote`, or `newer` |
+| `status` | Show mount, sync, and service status |
+
+### Mount vs Sync
+
+| Feature | Mount | Sync |
+|---------|-------|------|
+| Access | All remote files | Specific folders only |
+| Speed | Slower (network latency) | Fast (local files) |
+| Offline | Limited | Full access |
+| Use case | Browsing, occasional access | Heavy workloads (e.g., Ableton projects) |
+
+### Sync Destinations
+
+Sync keeps local folders in bidirectional sync with remote folders. Each destination:
+- Runs every 60 seconds via launchd
+- Has independent failure tracking
+- Survives reboots and sleep/wake cycles
+
+```bash
+# Add a destination (name is arbitrary, use whatever makes sense)
+./opencloud-mount.sh install music
+# Prompts for:
+#   Local folder:  ~/Music/Projects
+#   Remote folder: Music/Projects
+
+# Add more destinations as needed
+./opencloud-mount.sh install documents
+./opencloud-mount.sh install photos
+
+# List all destinations
+./opencloud-mount.sh sync ls
+
+# Remove a destination
+./opencloud-mount.sh sync rm documents
+```
+
+### Resync Modes
+
+When sync gets out of sync or for initial setup:
+
+```bash
+./opencloud-mount.sh resync music           # default: newer
+./opencloud-mount.sh resync music local     # local folder is truth
+./opencloud-mount.sh resync music remote    # remote folder is truth
+./opencloud-mount.sh resync music newer     # newer file wins (keeps backup)
+```
+
+| Mode | Behavior |
+|------|----------|
+| `newer` | Newer file wins, older file kept with suffix (default, safest) |
+| `local` | Local folder is source of truth, overwrites remote |
+| `remote` | Remote folder is source of truth, overwrites local |
+
+### Config Files
+
+| File | Purpose |
+|------|---------|
+| `~/.opencloud-mount.conf` | Mount point and cache settings |
+| `~/.opencloud-sync.d/<name>.conf` | Sync destination config |
+| `~/Library/LaunchAgents/com.opencloud.sync.<name>.plist` | Launchd service |
+
+### Logs
+
+| Log | Purpose |
+|-----|---------|
+| `~/.opencloud-mount.log` | Mount operations |
+| `~/.opencloud-sync.log` | Sync operations |
+| `~/.opencloud-sync-<name>.log` | Launchd service output |
