@@ -5,12 +5,12 @@
 #
 # Usage:
 #   ./opencloud-mount.sh setup     - Configure rclone remote and sync folders
-#   ./opencloud-mount.sh mount     - Mount the WebDAV share
+#   ./opencloud-mount.sh mount     - Mount the WebDAV share (manual)
 #   ./opencloud-mount.sh unmount   - Unmount the share
 #   ./opencloud-mount.sh sync      - Run bidirectional sync (for fast local access)
 #   ./opencloud-mount.sh status    - Check mount and sync status
-#   ./opencloud-mount.sh install   - Install launchd services (auto mount + sync)
-#   ./opencloud-mount.sh uninstall - Remove launchd services
+#   ./opencloud-mount.sh install   - Install launchd sync service (every 60s)
+#   ./opencloud-mount.sh uninstall - Remove launchd sync service
 #
 
 set -e
@@ -28,9 +28,7 @@ DEFAULT_SYNC_REMOTE=""
 
 # Launchd plist paths
 LAUNCHD_DIR="$HOME/Library/LaunchAgents"
-MOUNT_PLIST="$LAUNCHD_DIR/com.opencloud.mount.plist"
 SYNC_PLIST="$LAUNCHD_DIR/com.opencloud.sync.plist"
-MOUNT_LABEL="com.opencloud.mount"
 SYNC_LABEL="com.opencloud.sync"
 
 # Colors for output
@@ -348,24 +346,6 @@ show_status() {
     fi
 
     echo ""
-    echo "Launchd Service (mount)"
-    echo "-----------------------"
-    if [ -f "$MOUNT_PLIST" ]; then
-        echo -e "Installed:   ${GREEN}yes${NC}"
-        if is_launchd_loaded "$MOUNT_LABEL"; then
-            if is_launchd_running "$MOUNT_LABEL"; then
-                echo -e "Status:      ${GREEN}RUNNING${NC}"
-            else
-                echo -e "Status:      ${GREEN}LOADED${NC} (waiting for next interval)"
-            fi
-        else
-            echo -e "Status:      ${YELLOW}NOT LOADED${NC} (run: $0 install)"
-        fi
-    else
-        echo -e "Installed:   ${YELLOW}no${NC}"
-    fi
-
-    echo ""
     echo "Bidirectional Sync"
     echo "------------------"
     if [ -n "$SYNC_LOCAL" ] && [ -n "$SYNC_REMOTE" ]; then
@@ -411,41 +391,19 @@ show_status() {
 
 # Install launchd services
 install_launchd() {
+    if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
+        log_error "Sync not configured. Run setup first to configure sync folders."
+        exit 1
+    fi
+
     local script_path
     script_path=$(realpath "$0")
 
     mkdir -p "$LAUNCHD_DIR"
 
-    # Create mount plist (runs every 5 minutes)
-    log_info "Creating mount launchd service..."
-    cat > "$MOUNT_PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>$MOUNT_LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$script_path</string>
-        <string>mount</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>300</integer>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>$HOME/.opencloud-mount-launchd.log</string>
-    <key>StandardErrorPath</key>
-    <string>$HOME/.opencloud-mount-launchd.log</string>
-</dict>
-</plist>
-EOF
-
-    # Create sync plist if sync is configured (runs every 60 seconds)
-    if [ -n "$SYNC_LOCAL" ] && [ -n "$SYNC_REMOTE" ]; then
-        log_info "Creating sync launchd service..."
-        cat > "$SYNC_PLIST" <<EOF
+    # Create sync plist (runs every 60 seconds)
+    log_info "Creating sync launchd service..."
+    cat > "$SYNC_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -461,6 +419,11 @@ EOF
     <integer>60</integer>
     <key>RunAtLoad</key>
     <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>$HOME/.opencloud-sync-launchd.log</string>
     <key>StandardErrorPath</key>
@@ -468,59 +431,50 @@ EOF
 </dict>
 </plist>
 EOF
-    fi
 
-    # Unload existing services if loaded
-    if is_launchd_loaded "$MOUNT_LABEL"; then
-        launchctl unload "$MOUNT_PLIST" 2>/dev/null || true
-    fi
+    # Unload existing service if loaded
     if is_launchd_loaded "$SYNC_LABEL"; then
         launchctl unload "$SYNC_PLIST" 2>/dev/null || true
     fi
 
-    # Load services
-    log_info "Loading launchd services..."
-    launchctl load "$MOUNT_PLIST"
-    if [ -f "$SYNC_PLIST" ]; then
-        launchctl load "$SYNC_PLIST"
-    fi
+    # Load service
+    log_info "Loading launchd service..."
+    launchctl load "$SYNC_PLIST"
 
-    log_info "Launchd services installed and started"
-    log_info "Mount will run every 5 minutes and at login"
-    if [ -f "$SYNC_PLIST" ]; then
-        log_info "Sync will run every 60 seconds and at login"
-    fi
+    log_info "Sync service installed and started"
+    log_info "Sync will run every 60 seconds and at login"
     echo ""
     log_info "View status with: $0 status"
 }
 
 # Uninstall launchd services
 uninstall_launchd() {
-    log_info "Removing launchd services..."
+    local removed=false
 
-    # Unload and remove mount service
-    if [ -f "$MOUNT_PLIST" ]; then
-        if is_launchd_loaded "$MOUNT_LABEL"; then
-            launchctl unload "$MOUNT_PLIST" 2>/dev/null || true
-        fi
-        rm -f "$MOUNT_PLIST"
+    # Remove old mount service if it exists (legacy cleanup)
+    local old_mount_plist="$LAUNCHD_DIR/com.opencloud.mount.plist"
+    if [ -f "$old_mount_plist" ]; then
+        log_info "Removing mount launchd service..."
+        launchctl unload "$old_mount_plist" 2>/dev/null || true
+        rm -f "$old_mount_plist"
         log_info "Mount service removed"
-    else
-        log_info "Mount service not installed"
+        removed=true
     fi
 
-    # Unload and remove sync service
+    # Remove sync service
     if [ -f "$SYNC_PLIST" ]; then
+        log_info "Removing sync launchd service..."
         if is_launchd_loaded "$SYNC_LABEL"; then
             launchctl unload "$SYNC_PLIST" 2>/dev/null || true
         fi
         rm -f "$SYNC_PLIST"
         log_info "Sync service removed"
-    else
-        log_info "Sync service not installed"
+        removed=true
     fi
 
-    log_info "Launchd services uninstalled"
+    if [ "$removed" = false ]; then
+        log_info "No services installed"
+    fi
 }
 
 # Main
@@ -558,8 +512,8 @@ case "${1:-}" in
         echo "  unmount   - Unmount the share"
         echo "  sync      - Run bidirectional sync (for fast local access)"
         echo "  status    - Show mount, sync, and launchd service status"
-        echo "  install   - Install launchd services (auto mount + sync)"
-        echo "  uninstall - Remove launchd services"
+        echo "  install   - Install launchd sync service (runs every 60s)"
+        echo "  uninstall - Remove launchd sync service"
         exit 1
         ;;
 esac
