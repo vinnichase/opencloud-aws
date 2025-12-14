@@ -292,6 +292,7 @@ do_resync() {
     local mode="${1:-newer}"
     local resync_mode
 
+    local conflict_loser=""
     case "$mode" in
         local)
             resync_mode="path1"
@@ -301,6 +302,7 @@ do_resync() {
             ;;
         newer)
             resync_mode="newer"
+            conflict_loser="--conflict-loser num"
             ;;
         *)
             log_error "Invalid mode: $mode"
@@ -334,6 +336,7 @@ do_resync() {
     if rclone bisync "$SYNC_LOCAL" "$REMOTE_NAME:$SYNC_REMOTE" \
         --resync \
         --resync-mode "$resync_mode" \
+        $conflict_loser \
         --create-empty-src-dirs \
         --compare size,modtime \
         --slow-hash-sync-only \
@@ -438,6 +441,32 @@ install_launchd() {
     if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
         log_error "Sync not configured. Run setup first to configure sync folders."
         exit 1
+    fi
+
+    # Check if this is first run (no bisync state files)
+    local bisync_dir="$HOME/.cache/rclone/bisync"
+    if [ ! -d "$bisync_dir" ] || [ -z "$(ls -A "$bisync_dir" 2>/dev/null)" ]; then
+        echo ""
+        log_warn "First time setup - initial sync required"
+        echo ""
+        echo "Choose sync strategy:"
+        echo "  1) newer  - Keep newer file from either side (safer, keeps backup of older)"
+        echo "  2) local  - Local folder is source of truth (overwrites remote)"
+        echo "  3) remote - Remote folder is source of truth (overwrites local)"
+        echo ""
+        echo -n "Select strategy [1-3, default=1]: "
+        read -r choice
+
+        local mode
+        case "$choice" in
+            2) mode="local" ;;
+            3) mode="remote" ;;
+            *) mode="newer" ;;
+        esac
+
+        echo ""
+        do_resync "$mode"
+        echo ""
     fi
 
     local script_path
