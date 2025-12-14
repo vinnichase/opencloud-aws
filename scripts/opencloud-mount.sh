@@ -8,7 +8,7 @@
 #   ./opencloud-mount.sh mount     - Mount the WebDAV share (manual)
 #   ./opencloud-mount.sh unmount   - Unmount the share
 #   ./opencloud-mount.sh sync      - Run bidirectional sync
-#   ./opencloud-mount.sh resync    - Full resync (local = source of truth)
+#   ./opencloud-mount.sh resync    - Full resync [local|remote|newer]
 #   ./opencloud-mount.sh status    - Check mount and sync status
 #   ./opencloud-mount.sh install   - Install launchd sync service (every 60s)
 #   ./opencloud-mount.sh uninstall - Remove launchd sync service
@@ -287,8 +287,33 @@ do_sync() {
     trap - EXIT
 }
 
-# Manual resync (local is source of truth)
+# Manual resync with selectable mode
 do_resync() {
+    local mode="${1:-newer}"
+    local resync_mode
+
+    case "$mode" in
+        local)
+            resync_mode="path1"
+            ;;
+        remote)
+            resync_mode="path2"
+            ;;
+        newer)
+            resync_mode="newer"
+            ;;
+        *)
+            log_error "Invalid mode: $mode"
+            echo "Usage: $0 resync [local|remote|newer]"
+            echo ""
+            echo "Modes:"
+            echo "  local  - Local folder is source of truth"
+            echo "  remote - Remote folder is source of truth"
+            echo "  newer  - Newer file wins (default, restores deleted files)"
+            exit 1
+            ;;
+    esac
+
     if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
         log_error "Sync not configured. Run setup to configure sync folders."
         exit 1
@@ -302,13 +327,13 @@ do_resync() {
 
     mkdir -p "$SYNC_LOCAL"
 
-    log_warn "Running resync with local as source of truth..."
+    log_warn "Running resync with mode: $mode ($resync_mode)"
     log_info "Local:  $SYNC_LOCAL"
     log_info "Remote: $REMOTE_NAME:$SYNC_REMOTE"
 
     if rclone bisync "$SYNC_LOCAL" "$REMOTE_NAME:$SYNC_REMOTE" \
         --resync \
-        --resync-mode path1 \
+        --resync-mode "$resync_mode" \
         --create-empty-src-dirs \
         --compare size,modtime \
         --slow-hash-sync-only \
@@ -316,6 +341,7 @@ do_resync() {
         -v \
         --log-file="$HOME/.opencloud-sync.log" 2>&1; then
         log_info "Resync completed successfully"
+        rm -f "$SYNC_FAIL_COUNT_FILE"
     else
         log_error "Resync failed. Check $HOME/.opencloud-sync.log"
     fi
@@ -513,7 +539,7 @@ case "${1:-}" in
         do_sync
         ;;
     resync)
-        do_resync
+        do_resync "${2:-}"
         ;;
     status)
         show_status
@@ -532,7 +558,7 @@ case "${1:-}" in
         echo "  mount     - Mount OpenCloud WebDAV to $MOUNT_POINT"
         echo "  unmount   - Unmount the share"
         echo "  sync      - Run bidirectional sync (for fast local access)"
-        echo "  resync    - Full resync with local as source of truth"
+        echo "  resync    - Full resync [local|remote|newer] (default: newer)"
         echo "  status    - Show mount, sync, and launchd service status"
         echo "  install   - Install launchd sync service (runs every 60s)"
         echo "  uninstall - Remove launchd sync service"
