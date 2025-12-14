@@ -4,14 +4,16 @@
 # Mounts an OpenCloud WebDAV server using rclone, with optional bidirectional sync
 #
 # Usage:
-#   ./opencloud-mount.sh setup     - Configure rclone remote and sync folders
-#   ./opencloud-mount.sh mount     - Mount the WebDAV share (manual)
-#   ./opencloud-mount.sh unmount   - Unmount the share
-#   ./opencloud-mount.sh sync      - Run bidirectional sync
-#   ./opencloud-mount.sh resync    - Full resync [local|remote|newer]
-#   ./opencloud-mount.sh status    - Check mount and sync status
-#   ./opencloud-mount.sh install   - Install launchd sync service (every 60s)
-#   ./opencloud-mount.sh uninstall - Remove launchd sync service
+#   ./opencloud-mount.sh setup              - Configure rclone remote
+#   ./opencloud-mount.sh mount              - Mount the WebDAV share
+#   ./opencloud-mount.sh unmount            - Unmount the share
+#   ./opencloud-mount.sh install <name>     - Add sync destination and install service
+#   ./opencloud-mount.sh uninstall <name>   - Remove launchd service for destination
+#   ./opencloud-mount.sh sync               - Run all syncs
+#   ./opencloud-mount.sh sync ls            - List all sync destinations
+#   ./opencloud-mount.sh sync rm <name>     - Remove destination from config
+#   ./opencloud-mount.sh resync <name> [mode] - Full resync for destination
+#   ./opencloud-mount.sh status             - Show status
 #
 
 set -e
@@ -19,18 +21,10 @@ set -e
 # Configuration
 REMOTE_NAME="opencloud"
 CONFIG_FILE="$HOME/.opencloud-mount.conf"
-SYNC_LOCK_FILE="$HOME/.opencloud-sync.lock"
-SYNC_FAIL_COUNT_FILE="$HOME/.opencloud-sync-failures"
-SYNC_MAX_FAILURES=3
+SYNC_DIR="$HOME/.opencloud-sync.d"
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
 DEFAULT_MOUNT_POINT="$HOME/OpenCloud"
 DEFAULT_CACHE_SIZE="10"
-DEFAULT_SYNC_LOCAL=""
-DEFAULT_SYNC_REMOTE=""
-
-# Launchd plist paths
-LAUNCHD_DIR="$HOME/Library/LaunchAgents"
-SYNC_PLIST="$LAUNCHD_DIR/com.opencloud.sync.plist"
-SYNC_LABEL="com.opencloud.sync"
 
 # Colors for output
 RED='\033[0;31m'
@@ -42,15 +36,31 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Load config file if it exists
+# Load main config file
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
     fi
     MOUNT_POINT="${MOUNT_POINT:-$DEFAULT_MOUNT_POINT}"
     CACHE_SIZE="${CACHE_SIZE:-$DEFAULT_CACHE_SIZE}"
-    SYNC_LOCAL="${SYNC_LOCAL:-$DEFAULT_SYNC_LOCAL}"
-    SYNC_REMOTE="${SYNC_REMOTE:-$DEFAULT_SYNC_REMOTE}"
+}
+
+# Load a sync destination config
+load_sync_config() {
+    local name="$1"
+    local config_file="$SYNC_DIR/$name.conf"
+    if [ -f "$config_file" ]; then
+        source "$config_file"
+        return 0
+    fi
+    return 1
+}
+
+# Get all sync destination names
+get_sync_names() {
+    if [ -d "$SYNC_DIR" ]; then
+        ls "$SYNC_DIR"/*.conf 2>/dev/null | xargs -I {} basename {} .conf
+    fi
 }
 
 # Check if rclone is installed
@@ -63,7 +73,7 @@ check_rclone() {
     fi
 }
 
-# Setup rclone remote configuration
+# Setup rclone remote configuration (no sync paths)
 setup_remote() {
     log_info "Setting up rclone remote '$REMOTE_NAME'..."
 
@@ -99,41 +109,19 @@ setup_remote() {
     read -r cache_size
     cache_size="${cache_size:-$DEFAULT_CACHE_SIZE}"
 
-    # Prompt for bidirectional sync (optional)
-    echo ""
-    echo "Bidirectional sync keeps a local folder synced with a remote folder."
-    echo "This gives native disk speed for apps like Ableton, with changes syncing every minute."
-    echo "(Leave empty to skip sync setup)"
-    echo ""
-    echo -n "Enter local folder to sync (e.g., ~/Music/AbletonProjects): "
-    read -r sync_local
-
-    sync_remote=""
-    if [ -n "$sync_local" ]; then
-        # Expand tilde
-        sync_local="${sync_local/#\~/$HOME}"
-        echo -n "Enter remote folder to sync (e.g., Projects/Ableton): "
-        read -r sync_remote
-    fi
-
     if [ -z "$server_url" ] || [ -z "$username" ] || [ -z "$password" ]; then
         log_error "Server URL, username, and password are required"
         exit 1
     fi
 
-    # Save config and reload
+    # Save config
     cat > "$CONFIG_FILE" <<EOF
 MOUNT_POINT="$mount_point"
 CACHE_SIZE="$cache_size"
-SYNC_LOCAL="$sync_local"
-SYNC_REMOTE="$sync_remote"
 EOF
     load_config
     log_info "Mount point: $MOUNT_POINT"
     log_info "Cache size limit: ${CACHE_SIZE}GB"
-    if [ -n "$SYNC_LOCAL" ] && [ -n "$SYNC_REMOTE" ]; then
-        log_info "Sync: $SYNC_LOCAL <-> $REMOTE_NAME:$SYNC_REMOTE"
-    fi
 
     # Obscure the password for rclone
     local obscured_pass
@@ -156,6 +144,9 @@ EOF
         log_error "Connection test failed"
         exit 1
     fi
+
+    echo ""
+    log_info "To add sync destinations, run: $0 install <name>"
 }
 
 # Check if already mounted
@@ -225,48 +216,45 @@ do_unmount() {
     log_info "Unmounted successfully"
 }
 
-# Bidirectional sync
-do_sync() {
-    if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
-        log_error "Sync not configured. Run setup to configure sync folders."
-        exit 1
+# Run sync for a specific destination
+run_sync() {
+    local name="$1"
+    local config_file="$SYNC_DIR/$name.conf"
+    local lock_file="$SYNC_DIR/$name.lock"
+    local fail_file="$SYNC_DIR/$name.failures"
+
+    if [ ! -f "$config_file" ]; then
+        log_error "Destination '$name' not found"
+        return 1
     fi
 
-    # Check if remote exists
-    if ! rclone listremotes | grep -q "^${REMOTE_NAME}:$"; then
-        log_error "Remote '$REMOTE_NAME' not configured. Run setup first."
-        exit 1
-    fi
-
-    # Create local folder if needed
-    mkdir -p "$SYNC_LOCAL"
+    source "$config_file"
 
     # Check for lock file (prevent overlapping syncs)
-    if [ -f "$SYNC_LOCK_FILE" ]; then
+    if [ -f "$lock_file" ]; then
         local lock_pid
-        lock_pid=$(cat "$SYNC_LOCK_FILE" 2>/dev/null)
+        lock_pid=$(cat "$lock_file" 2>/dev/null)
         if kill -0 "$lock_pid" 2>/dev/null; then
-            log_warn "Sync already running (PID $lock_pid), skipping"
+            log_warn "[$name] Sync already running (PID $lock_pid), skipping"
             return 0
         else
-            # Stale lock file, remove it
-            rm -f "$SYNC_LOCK_FILE"
+            rm -f "$lock_file"
         fi
     fi
 
     # Create lock file
-    echo $$ > "$SYNC_LOCK_FILE"
-    trap 'rm -f "$SYNC_LOCK_FILE"' EXIT
+    echo $$ > "$lock_file"
+    trap "rm -f '$lock_file'" EXIT
 
-    log_info "Syncing $SYNC_LOCAL <-> $REMOTE_NAME:$SYNC_REMOTE"
+    log_info "[$name] Syncing $SYNC_LOCAL <-> $REMOTE_NAME:$SYNC_REMOTE"
 
-    # Track failure count for status display
+    # Track failure count
     local fail_count=0
-    if [ -f "$SYNC_FAIL_COUNT_FILE" ]; then
-        fail_count=$(cat "$SYNC_FAIL_COUNT_FILE")
+    if [ -f "$fail_file" ]; then
+        fail_count=$(cat "$fail_file")
     fi
 
-    # Run bisync (no auto-resync, run 'resync' command manually if needed)
+    # Run bisync
     if rclone bisync "$SYNC_LOCAL" "$REMOTE_NAME:$SYNC_REMOTE" \
         --create-empty-src-dirs \
         --compare size,modtime \
@@ -274,25 +262,124 @@ do_sync() {
         --resilient \
         -v \
         --log-file="$HOME/.opencloud-sync.log" 2>&1; then
-        log_info "Sync completed successfully"
-        rm -f "$SYNC_FAIL_COUNT_FILE"
+        log_info "[$name] Sync completed successfully"
+        rm -f "$fail_file"
     else
         fail_count=$((fail_count + 1))
-        echo "$fail_count" > "$SYNC_FAIL_COUNT_FILE"
-        log_error "Sync failed ($fail_count consecutive). Check $HOME/.opencloud-sync.log"
-        log_error "To recover, run: $0 resync"
+        echo "$fail_count" > "$fail_file"
+        log_error "[$name] Sync failed ($fail_count consecutive). Run: $0 resync $name"
     fi
 
-    rm -f "$SYNC_LOCK_FILE"
+    rm -f "$lock_file"
     trap - EXIT
 }
 
-# Manual resync with selectable mode
-do_resync() {
-    local mode="${1:-newer}"
-    local resync_mode
+# Run sync for all destinations
+do_sync_all() {
+    local names
+    names=$(get_sync_names)
 
+    if [ -z "$names" ]; then
+        log_error "No sync destinations configured. Run: $0 install <name>"
+        exit 1
+    fi
+
+    for name in $names; do
+        run_sync "$name"
+    done
+}
+
+# List all sync destinations
+do_sync_ls() {
+    local names
+    names=$(get_sync_names)
+
+    if [ -z "$names" ]; then
+        echo "No sync destinations configured."
+        echo "Add one with: $0 install <name>"
+        return
+    fi
+
+    echo "Sync Destinations"
+    echo "================="
+    echo ""
+
+    for name in $names; do
+        source "$SYNC_DIR/$name.conf"
+        local plist="$LAUNCHD_DIR/com.opencloud.sync.$name.plist"
+        local fail_file="$SYNC_DIR/$name.failures"
+        local status="${GREEN}OK${NC}"
+
+        if [ -f "$fail_file" ]; then
+            local fails
+            fails=$(cat "$fail_file")
+            status="${RED}FAILING${NC} ($fails)"
+        fi
+
+        echo -e "[$name]"
+        echo "  Local:   $SYNC_LOCAL"
+        echo "  Remote:  $REMOTE_NAME:$SYNC_REMOTE"
+        if [ -f "$plist" ]; then
+            echo -e "  Service: ${GREEN}installed${NC}"
+        else
+            echo -e "  Service: ${YELLOW}not installed${NC}"
+        fi
+        echo -e "  Status:  $status"
+        echo ""
+    done
+}
+
+# Remove a sync destination from config
+do_sync_rm() {
+    local name="$1"
+
+    if [ -z "$name" ]; then
+        log_error "Usage: $0 sync rm <name>"
+        exit 1
+    fi
+
+    local config_file="$SYNC_DIR/$name.conf"
+    local plist="$LAUNCHD_DIR/com.opencloud.sync.$name.plist"
+
+    if [ ! -f "$config_file" ]; then
+        log_error "Destination '$name' not found"
+        exit 1
+    fi
+
+    # Uninstall service first if exists
+    if [ -f "$plist" ]; then
+        do_uninstall "$name"
+    fi
+
+    # Remove config and related files
+    rm -f "$config_file"
+    rm -f "$SYNC_DIR/$name.lock"
+    rm -f "$SYNC_DIR/$name.failures"
+
+    log_info "Destination '$name' removed"
+}
+
+# Resync a specific destination
+do_resync() {
+    local name="$1"
+    local mode="${2:-newer}"
+
+    if [ -z "$name" ]; then
+        log_error "Usage: $0 resync <name> [local|remote|newer]"
+        exit 1
+    fi
+
+    local config_file="$SYNC_DIR/$name.conf"
+    if [ ! -f "$config_file" ]; then
+        log_error "Destination '$name' not found"
+        exit 1
+    fi
+
+    source "$config_file"
+
+    local resync_mode
     local conflict_loser=""
+
     case "$mode" in
         local)
             resync_mode="path1"
@@ -306,32 +393,23 @@ do_resync() {
             ;;
         *)
             log_error "Invalid mode: $mode"
-            echo "Usage: $0 resync [local|remote|newer]"
+            echo "Usage: $0 resync <name> [local|remote|newer]"
             echo ""
             echo "Modes:"
             echo "  local  - Local folder is source of truth"
             echo "  remote - Remote folder is source of truth"
-            echo "  newer  - Newer file wins (default, restores deleted files)"
+            echo "  newer  - Newer file wins (default, keeps backup of older)"
             exit 1
             ;;
     esac
 
-    if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
-        log_error "Sync not configured. Run setup to configure sync folders."
-        exit 1
-    fi
-
-    # Check if remote exists
-    if ! rclone listremotes | grep -q "^${REMOTE_NAME}:$"; then
-        log_error "Remote '$REMOTE_NAME' not configured. Run setup first."
-        exit 1
-    fi
-
     mkdir -p "$SYNC_LOCAL"
 
-    log_warn "Running resync with mode: $mode ($resync_mode)"
+    log_warn "[$name] Running resync with mode: $mode ($resync_mode)"
     log_info "Local:  $SYNC_LOCAL"
     log_info "Remote: $REMOTE_NAME:$SYNC_REMOTE"
+
+    local fail_file="$SYNC_DIR/$name.failures"
 
     if rclone bisync "$SYNC_LOCAL" "$REMOTE_NAME:$SYNC_REMOTE" \
         --resync \
@@ -343,24 +421,17 @@ do_resync() {
         --resilient \
         -v \
         --log-file="$HOME/.opencloud-sync.log" 2>&1; then
-        log_info "Resync completed successfully"
-        rm -f "$SYNC_FAIL_COUNT_FILE"
+        log_info "[$name] Resync completed successfully"
+        rm -f "$fail_file"
     else
-        log_error "Resync failed. Check $HOME/.opencloud-sync.log"
+        log_error "[$name] Resync failed. Check $HOME/.opencloud-sync.log"
     fi
 }
 
-# Check if launchd job is loaded and running
+# Check if launchd job is loaded
 is_launchd_loaded() {
     local label="$1"
     launchctl list 2>/dev/null | grep -q "$label"
-}
-
-is_launchd_running() {
-    local label="$1"
-    local pid
-    pid=$(launchctl list 2>/dev/null | grep "$label" | awk '{print $1}')
-    [ -n "$pid" ] && [ "$pid" != "-" ]
 }
 
 # Show status
@@ -393,61 +464,108 @@ show_status() {
     fi
 
     echo ""
-    echo "Bidirectional Sync"
-    echo "------------------"
-    if [ -n "$SYNC_LOCAL" ] && [ -n "$SYNC_REMOTE" ]; then
-        echo "Local:       $SYNC_LOCAL"
-        echo "Remote:      $REMOTE_NAME:$SYNC_REMOTE"
-        if [ -f "$SYNC_LOCK_FILE" ]; then
-            echo -e "Status:      ${YELLOW}SYNCING${NC}"
-        elif [ -f "$SYNC_FAIL_COUNT_FILE" ]; then
-            local fails
-            fails=$(cat "$SYNC_FAIL_COUNT_FILE")
-            echo -e "Status:      ${RED}FAILING${NC} ($fails consecutive, run: $0 resync)"
-        else
-            echo -e "Status:      ${GREEN}OK${NC}"
-        fi
+    do_sync_ls
 
-        echo ""
-        echo "Launchd Service (sync)"
-        echo "----------------------"
-        if [ -f "$SYNC_PLIST" ]; then
-            echo -e "Installed:   ${GREEN}yes${NC}"
-            if is_launchd_loaded "$SYNC_LABEL"; then
-                if is_launchd_running "$SYNC_LABEL"; then
-                    echo -e "Status:      ${GREEN}RUNNING${NC}"
-                else
-                    echo -e "Status:      ${GREEN}LOADED${NC} (waiting for next interval)"
-                fi
-            else
-                echo -e "Status:      ${YELLOW}NOT LOADED${NC} (run: $0 install)"
-            fi
-        else
-            echo -e "Installed:   ${YELLOW}no${NC}"
-        fi
-    else
-        echo "Sync:        Not configured"
-    fi
-
-    echo ""
     echo "Logs"
     echo "----"
     echo "Mount log:   ~/.opencloud-mount.log"
     echo "Sync log:    ~/.opencloud-sync.log"
 }
 
-# Install launchd services
-install_launchd() {
-    if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
-        log_error "Sync not configured. Run setup first to configure sync folders."
+# Install a sync destination
+do_install() {
+    local name="$1"
+
+    if [ -z "$name" ]; then
+        log_error "Usage: $0 install <name>"
+        echo ""
+        echo "Example: $0 install ableton"
         exit 1
     fi
 
-    # Check if this is first run (no bisync state files)
+    # Validate name (alphanumeric and dashes only)
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        log_error "Invalid name. Use only letters, numbers, dashes, and underscores."
+        exit 1
+    fi
+
+    # Check if remote exists
+    if ! rclone listremotes | grep -q "^${REMOTE_NAME}:$"; then
+        log_error "Remote not configured. Run: $0 setup"
+        exit 1
+    fi
+
+    mkdir -p "$SYNC_DIR"
+
+    local config_file="$SYNC_DIR/$name.conf"
+    local plist="$LAUNCHD_DIR/com.opencloud.sync.$name.plist"
+    local label="com.opencloud.sync.$name"
+
+    # Load existing values if destination exists
+    local existing_local=""
+    local existing_remote=""
+    if [ -f "$config_file" ]; then
+        source "$config_file"
+        existing_local="$SYNC_LOCAL"
+        existing_remote="$SYNC_REMOTE"
+        log_info "Updating existing destination: $name"
+    else
+        log_info "Adding sync destination: $name"
+    fi
+
+    echo ""
+
+    # Prompt for local path (show existing as default)
+    if [ -n "$existing_local" ]; then
+        echo -n "Enter local folder path [$existing_local]: "
+    else
+        echo -n "Enter local folder path (e.g., ~/Music/Ableton): "
+    fi
+    read -r sync_local
+    sync_local="${sync_local/#\~/$HOME}"
+    sync_local="${sync_local:-$existing_local}"
+
+    if [ -z "$sync_local" ]; then
+        log_error "Local path is required"
+        exit 1
+    fi
+
+    # Prompt for remote path (show existing as default)
+    if [ -n "$existing_remote" ]; then
+        echo -n "Enter remote folder path [$existing_remote]: "
+    else
+        echo -n "Enter remote folder path (e.g., Music/Ableton): "
+    fi
+    read -r sync_remote
+    sync_remote="${sync_remote:-$existing_remote}"
+
+    if [ -z "$sync_remote" ]; then
+        log_error "Remote path is required"
+        exit 1
+    fi
+
+    # Save config
+    cat > "$config_file" <<EOF
+SYNC_LOCAL="$sync_local"
+SYNC_REMOTE="$sync_remote"
+EOF
+
+    log_info "Destination configured:"
+    echo "  Local:  $sync_local"
+    echo "  Remote: $REMOTE_NAME:$sync_remote"
+
+    # Check if initial sync needed
     local bisync_dir="$HOME/.cache/rclone/bisync"
-    if [ ! -d "$bisync_dir" ] || [ -z "$(ls -A "$bisync_dir" 2>/dev/null)" ]; then
+    local needs_resync=true
+
+    # Simple check - if any bisync state exists for this path combo, skip resync prompt
+    if [ -d "$bisync_dir" ] && ls "$bisync_dir"/*"${sync_remote//\//_}"* &>/dev/null 2>&1; then
+        needs_resync=false
+    fi
+
+    if [ "$needs_resync" = true ]; then
         echo ""
-        log_warn "First time setup - initial sync required"
+        log_warn "Initial sync required"
         echo ""
         echo "Choose sync strategy:"
         echo "  1) newer  - Keep newer file from either side (safer, keeps backup of older)"
@@ -465,28 +583,30 @@ install_launchd() {
         esac
 
         echo ""
-        do_resync "$mode"
-        echo ""
+        do_resync "$name" "$mode"
     fi
+
+    # Create launchd plist
+    echo ""
+    log_info "Installing launchd service..."
 
     local script_path
     script_path=$(realpath "$0")
 
     mkdir -p "$LAUNCHD_DIR"
 
-    # Create sync plist (runs every 60 seconds)
-    log_info "Creating sync launchd service..."
-    cat > "$SYNC_PLIST" <<EOF
+    cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>$SYNC_LABEL</string>
+    <string>$label</string>
     <key>ProgramArguments</key>
     <array>
         <string>$script_path</string>
         <string>sync</string>
+        <string>$name</string>
     </array>
     <key>StartInterval</key>
     <integer>60</integer>
@@ -498,56 +618,52 @@ install_launchd() {
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>$HOME/.opencloud-sync-launchd.log</string>
+    <string>$HOME/.opencloud-sync-$name.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.opencloud-sync-launchd.log</string>
+    <string>$HOME/.opencloud-sync-$name.log</string>
 </dict>
 </plist>
 EOF
 
-    # Unload existing service if loaded
-    if is_launchd_loaded "$SYNC_LABEL"; then
-        launchctl unload "$SYNC_PLIST" 2>/dev/null || true
+    # Unload if already loaded
+    if is_launchd_loaded "$label"; then
+        launchctl unload "$plist" 2>/dev/null || true
     fi
 
     # Load service
-    log_info "Loading launchd service..."
-    launchctl load "$SYNC_PLIST"
+    launchctl load "$plist"
 
-    log_info "Sync service installed and started"
-    log_info "Sync will run every 60 seconds and at login"
+    log_info "Service installed for '$name'"
+    log_info "Sync will run every 60 seconds"
     echo ""
     log_info "View status with: $0 status"
 }
 
-# Uninstall launchd services
-uninstall_launchd() {
-    local removed=false
+# Uninstall a sync destination's launchd service
+do_uninstall() {
+    local name="$1"
 
-    # Remove old mount service if it exists (legacy cleanup)
-    local old_mount_plist="$LAUNCHD_DIR/com.opencloud.mount.plist"
-    if [ -f "$old_mount_plist" ]; then
-        log_info "Removing mount launchd service..."
-        launchctl unload "$old_mount_plist" 2>/dev/null || true
-        rm -f "$old_mount_plist"
-        log_info "Mount service removed"
-        removed=true
+    if [ -z "$name" ]; then
+        log_error "Usage: $0 uninstall <name>"
+        exit 1
     fi
 
-    # Remove sync service
-    if [ -f "$SYNC_PLIST" ]; then
-        log_info "Removing sync launchd service..."
-        if is_launchd_loaded "$SYNC_LABEL"; then
-            launchctl unload "$SYNC_PLIST" 2>/dev/null || true
-        fi
-        rm -f "$SYNC_PLIST"
-        log_info "Sync service removed"
-        removed=true
+    local plist="$LAUNCHD_DIR/com.opencloud.sync.$name.plist"
+    local label="com.opencloud.sync.$name"
+
+    if [ ! -f "$plist" ]; then
+        log_info "Service for '$name' not installed"
+        return 0
     fi
 
-    if [ "$removed" = false ]; then
-        log_info "No services installed"
+    log_info "Uninstalling service for '$name'..."
+
+    if is_launchd_loaded "$label"; then
+        launchctl unload "$plist" 2>/dev/null || true
     fi
+
+    rm -f "$plist"
+    log_info "Service for '$name' removed"
 }
 
 # Main
@@ -565,32 +681,49 @@ case "${1:-}" in
         do_unmount
         ;;
     sync)
-        do_sync
+        case "${2:-}" in
+            ls)
+                do_sync_ls
+                ;;
+            rm)
+                do_sync_rm "${3:-}"
+                ;;
+            "")
+                do_sync_all
+                ;;
+            *)
+                # Sync specific destination
+                run_sync "$2"
+                ;;
+        esac
         ;;
     resync)
-        do_resync "${2:-}"
+        do_resync "${2:-}" "${3:-}"
         ;;
     status)
         show_status
         ;;
     install)
-        install_launchd
+        do_install "${2:-}"
         ;;
     uninstall)
-        uninstall_launchd
+        do_uninstall "${2:-}"
         ;;
     *)
-        echo "Usage: $0 {setup|mount|unmount|sync|resync|status|install|uninstall}"
+        echo "Usage: $0 <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  setup     - Configure rclone remote and sync folders"
-        echo "  mount     - Mount OpenCloud WebDAV to $MOUNT_POINT"
-        echo "  unmount   - Unmount the share"
-        echo "  sync      - Run bidirectional sync (for fast local access)"
-        echo "  resync    - Full resync [local|remote|newer] (default: newer)"
-        echo "  status    - Show mount, sync, and launchd service status"
-        echo "  install   - Install launchd sync service (runs every 60s)"
-        echo "  uninstall - Remove launchd sync service"
+        echo "  setup                  - Configure rclone remote"
+        echo "  mount                  - Mount OpenCloud WebDAV"
+        echo "  unmount                - Unmount the share"
+        echo "  install <name>         - Add sync destination and install service"
+        echo "  uninstall <name>       - Remove launchd service for destination"
+        echo "  sync                   - Run all syncs"
+        echo "  sync <name>            - Run sync for specific destination"
+        echo "  sync ls                - List all sync destinations"
+        echo "  sync rm <name>         - Remove destination from config"
+        echo "  resync <name> [mode]   - Full resync (mode: local|remote|newer)"
+        echo "  status                 - Show status"
         exit 1
         ;;
 esac
