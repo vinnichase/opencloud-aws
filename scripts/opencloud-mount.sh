@@ -7,7 +7,8 @@
 #   ./opencloud-mount.sh setup     - Configure rclone remote and sync folders
 #   ./opencloud-mount.sh mount     - Mount the WebDAV share (manual)
 #   ./opencloud-mount.sh unmount   - Unmount the share
-#   ./opencloud-mount.sh sync      - Run bidirectional sync (for fast local access)
+#   ./opencloud-mount.sh sync      - Run bidirectional sync
+#   ./opencloud-mount.sh resync    - Full resync (local = source of truth)
 #   ./opencloud-mount.sh status    - Check mount and sync status
 #   ./opencloud-mount.sh install   - Install launchd sync service (every 60s)
 #   ./opencloud-mount.sh uninstall - Remove launchd sync service
@@ -259,26 +260,14 @@ do_sync() {
 
     log_info "Syncing $SYNC_LOCAL <-> $REMOTE_NAME:$SYNC_REMOTE"
 
-    # Check failure count
+    # Track failure count for status display
     local fail_count=0
     if [ -f "$SYNC_FAIL_COUNT_FILE" ]; then
         fail_count=$(cat "$SYNC_FAIL_COUNT_FILE")
     fi
 
-    # Check if this is the first sync or if we need to recover (needs --resync)
-    local resync_flag=""
-    local bisync_dir="$HOME/.cache/rclone/bisync"
-    if [ ! -d "$bisync_dir" ] || [ -z "$(ls -A "$bisync_dir" 2>/dev/null)" ]; then
-        log_warn "First sync detected, running with --resync"
-        resync_flag="--resync"
-    elif [ "$fail_count" -ge "$SYNC_MAX_FAILURES" ]; then
-        log_warn "Too many failures ($fail_count), running with --resync to recover"
-        resync_flag="--resync"
-    fi
-
-    # Run bisync
+    # Run bisync (no auto-resync, run 'resync' command manually if needed)
     if rclone bisync "$SYNC_LOCAL" "$REMOTE_NAME:$SYNC_REMOTE" \
-        $resync_flag \
         --create-empty-src-dirs \
         --compare size,modtime \
         --slow-hash-sync-only \
@@ -286,21 +275,50 @@ do_sync() {
         -v \
         --log-file="$HOME/.opencloud-sync.log" 2>&1; then
         log_info "Sync completed successfully"
-        # Reset failure count on success
         rm -f "$SYNC_FAIL_COUNT_FILE"
     else
-        # Increment failure count
         fail_count=$((fail_count + 1))
         echo "$fail_count" > "$SYNC_FAIL_COUNT_FILE"
-        if [ "$fail_count" -ge "$SYNC_MAX_FAILURES" ]; then
-            log_error "Sync failed ($fail_count times). Will auto-recover with --resync on next run."
-        else
-            log_error "Sync failed ($fail_count/$SYNC_MAX_FAILURES). Check $HOME/.opencloud-sync.log"
-        fi
+        log_error "Sync failed ($fail_count consecutive). Check $HOME/.opencloud-sync.log"
+        log_error "To recover, run: $0 resync"
     fi
 
     rm -f "$SYNC_LOCK_FILE"
     trap - EXIT
+}
+
+# Manual resync (local is source of truth)
+do_resync() {
+    if [ -z "$SYNC_LOCAL" ] || [ -z "$SYNC_REMOTE" ]; then
+        log_error "Sync not configured. Run setup to configure sync folders."
+        exit 1
+    fi
+
+    # Check if remote exists
+    if ! rclone listremotes | grep -q "^${REMOTE_NAME}:$"; then
+        log_error "Remote '$REMOTE_NAME' not configured. Run setup first."
+        exit 1
+    fi
+
+    mkdir -p "$SYNC_LOCAL"
+
+    log_warn "Running resync with local as source of truth..."
+    log_info "Local:  $SYNC_LOCAL"
+    log_info "Remote: $REMOTE_NAME:$SYNC_REMOTE"
+
+    if rclone bisync "$SYNC_LOCAL" "$REMOTE_NAME:$SYNC_REMOTE" \
+        --resync \
+        --resync-mode path1 \
+        --create-empty-src-dirs \
+        --compare size,modtime \
+        --slow-hash-sync-only \
+        --resilient \
+        -v \
+        --log-file="$HOME/.opencloud-sync.log" 2>&1; then
+        log_info "Resync completed successfully"
+    else
+        log_error "Resync failed. Check $HOME/.opencloud-sync.log"
+    fi
 }
 
 # Check if launchd job is loaded and running
@@ -356,7 +374,7 @@ show_status() {
         elif [ -f "$SYNC_FAIL_COUNT_FILE" ]; then
             local fails
             fails=$(cat "$SYNC_FAIL_COUNT_FILE")
-            echo -e "Status:      ${RED}FAILING${NC} ($fails/$SYNC_MAX_FAILURES, auto-recovers at $SYNC_MAX_FAILURES)"
+            echo -e "Status:      ${RED}FAILING${NC} ($fails consecutive, run: $0 resync)"
         else
             echo -e "Status:      ${GREEN}OK${NC}"
         fi
@@ -494,6 +512,9 @@ case "${1:-}" in
     sync)
         do_sync
         ;;
+    resync)
+        do_resync
+        ;;
     status)
         show_status
         ;;
@@ -504,13 +525,14 @@ case "${1:-}" in
         uninstall_launchd
         ;;
     *)
-        echo "Usage: $0 {setup|mount|unmount|sync|status|install|uninstall}"
+        echo "Usage: $0 {setup|mount|unmount|sync|resync|status|install|uninstall}"
         echo ""
         echo "Commands:"
         echo "  setup     - Configure rclone remote and sync folders"
         echo "  mount     - Mount OpenCloud WebDAV to $MOUNT_POINT"
         echo "  unmount   - Unmount the share"
         echo "  sync      - Run bidirectional sync (for fast local access)"
+        echo "  resync    - Full resync with local as source of truth"
         echo "  status    - Show mount, sync, and launchd service status"
         echo "  install   - Install launchd sync service (runs every 60s)"
         echo "  uninstall - Remove launchd sync service"
